@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+    "noUncheckedIndexedAccess": true,
+    "baseUrl": ".",
+    "paths": {
+      "@nexus/shared": ["packages/shared/src/index.ts"],
+      "@nexus/ai-core": ["packages/ai-core/src/index.ts"],
+      "@nexus/memory": ["packages/memory/src/index.ts"],
+      "@nexus/companion": ["packages/companion/src/index.ts"]
+    }
+  }
+}

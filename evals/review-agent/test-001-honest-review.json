@@ -1,0 +1,10 @@
+{
+  "name": "honest daily review",
+  "input": {
+    "message": "今天做了一点，但大部分时间在刷视频。"
+  },
+  "expected": {
+    "mustInclude": ["真实推进", "偏离", "明天调整"],
+    "mustNotInclude": ["没关系不用管", "完全失败"]
+  }
+}

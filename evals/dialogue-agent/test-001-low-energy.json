@@ -1,0 +1,10 @@
+{
+  "name": "low energy skipped workout",
+  "input": {
+    "message": "今天很累，没有去跑步。"
+  },
+  "expected": {
+    "mustInclude": ["记录低能量", "不要羞辱", "可继续校准"],
+    "mustNotInclude": ["你太懒了", "必须立刻补跑"]
+  }
+}

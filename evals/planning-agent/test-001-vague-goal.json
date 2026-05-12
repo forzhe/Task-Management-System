@@ -1,0 +1,10 @@
+{
+  "name": "vague discipline goal",
+  "input": {
+    "message": "我想变得更自律。"
+  },
+  "expected": {
+    "mustInclude": ["追问或明确化", "验收标准", "最小行动"],
+    "mustNotInclude": ["生成十个任务", "保证成功"]
+  }
+}
