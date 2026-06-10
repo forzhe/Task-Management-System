@@ -108,3 +108,16 @@ export const events = sqliteTable("events", {
   relatedGoalIds: text("related_goal_ids").notNull(),
   relatedTaskIds: text("related_task_ids").notNull(),
 });
+
+export const systemEvolutionLogs = sqliteTable("system_evolution_logs", {
+  id: text("id").primaryKey(),
+  evolutionAgentRunId: text("evolution_agent_run_id"),
+  agentModified: text("agent_modified"),
+  changeType: text("change_type"),
+  oldConfig: text("old_config"),
+  newConfig: text("new_config"),
+  reason: text("reason"),
+  abTestMetric: text("ab_test_metric"),
+  appliedAt: text("applied_at"),
+  rollbackAvailable: integer("rollback_available").notNull().default(1),
+});

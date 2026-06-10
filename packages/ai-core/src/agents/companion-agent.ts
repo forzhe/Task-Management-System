@@ -1,6 +1,7 @@
 import type { AgentContext, AgentResult, CompanionState } from "@nexus/shared";
-import type { LlmClient } from "../llm.js";
+import { type LlmClient, toLlmTrace } from "../llm.js";
 import type { ModelRouter } from "../model-router.js";
+import { getAgentPrompt } from "../prompt-registry.js";
 import {
   companionOutputSchema,
   fallbackCompanionOutput,
@@ -17,14 +18,15 @@ export class CompanionAgent {
 
   async run(context: AgentContext, preferredState?: CompanionState): Promise<AgentResult> {
     const companion = this.tools.getCompanion();
+    const prompt = getAgentPrompt("companion");
+    const modelTier = this.router.route({ agentId: "companion", trigger: context.trigger });
     const response = await this.llm.complete({
       agentId: "companion",
-      modelTier: this.router.route({ agentId: "companion", trigger: context.trigger }),
+      modelTier,
       messages: [
         {
           role: "system",
-          content:
-            "你是 NEXUS-7 主小人。只返回 JSON，不要 Markdown。JSON 必须符合：{schemaVersion:1,agentId:'companion',summary:string,data:{state:'idle'|'focus'|'reminding'|'celebrating'|'disappointed'|'strict'|'caring'|'evolving',dialogue:string},warnings:[],fallbackUsed:false}。台词不超过 80 字，有性格，不过度解释功能。",
+          content: prompt.system,
         },
         {
           role: "user",
@@ -51,9 +53,22 @@ export class CompanionAgent {
       dialogue: envelope.data.dialogue,
     };
     this.tools.triggerCompanion(action);
+    const event = this.tools.unsafeLogEvent({
+      source: "companion-agent",
+      type: "agent_output",
+      category: "companion_feedback",
+      rawPayload: { response: response.content, ...toLlmTrace(response, prompt.version) },
+      structured: { output: envelope, action, modelTier },
+      occurredAt: new Date().toISOString(),
+      confidence: 0.75,
+      tags: ["companion"],
+      relatedGoalIds: [],
+      relatedTaskIds: context.currentTasks.map((task) => task.id),
+    });
     return {
       response: envelope.data.dialogue,
       structured: { companion: envelope },
+      events: [event],
       companionAction: action,
     };
   }

@@ -1,6 +1,8 @@
 import { Body, Controller, Get, Inject, Param, Patch, Post, Query } from "@nestjs/common";
 import type {
   Goal,
+  GoalStatusUpdateInput,
+  ProfileUpdateInput,
   ReviewType,
   Task,
   TaskStatus,
@@ -16,6 +18,11 @@ export class AppController {
   @Get("health")
   getHealth() {
     return this.nexus.getHealth();
+  }
+
+  @Get("user")
+  getUser() {
+    return this.nexus.getUser();
   }
 
   @Post("chat/send")
@@ -36,6 +43,16 @@ export class AppController {
   @Post("goals")
   createGoal(@Body() body: Pick<Goal, "title" | "level"> & Partial<Goal>) {
     return this.nexus.createGoal(body);
+  }
+
+  @Patch("goals/:id/status")
+  updateGoalStatus(@Param("id") id: string, @Body() body: GoalStatusUpdateInput) {
+    return this.nexus.updateGoalStatus(id, body.status);
+  }
+
+  @Patch("profile")
+  updateProfile(@Body() body: ProfileUpdateInput) {
+    return this.nexus.updateProfile(body);
   }
 
   @Get("tasks")
@@ -71,5 +88,46 @@ export class AppController {
   @Get("events/query")
   queryEvents(@Query("limit") limit?: string) {
     return this.nexus.queryEvents(limit ? Number(limit) : 20);
+  }
+
+  @Get("activity-watch/status")
+  getActivityWatchStatus() {
+    return this.nexus.getActivityWatchStatus();
+  }
+
+  @Post("insights/weekly")
+  runWeeklyInsight() {
+    return this.nexus.runWeeklyInsight();
+  }
+
+  @Post("coach/session")
+  runCoachSession(
+    @Body()
+    body: {
+      goalTitle: string;
+      userAnswer: string;
+      previousExchanges?: Array<{ question: string; answer: string }>;
+    },
+  ) {
+    return this.nexus.runCoachSession(body.goalTitle, {
+      goalTitle: body.goalTitle,
+      userAnswer: body.userAnswer,
+      previousExchanges: body.previousExchanges ?? [],
+    });
+  }
+
+  @Post("reminders/check")
+  runReminderCheck() {
+    return this.nexus.runReminderCheck();
+  }
+
+  @Get("browser/history")
+  getBrowserHistory(@Query("hours") hours?: string) {
+    return this.nexus.getBrowserHistory(hours ? Number(hours) : 8);
+  }
+
+  @Get("memory/search")
+  searchMemory(@Query("q") q: string, @Query("topK") topK?: string) {
+    return this.nexus.searchMemory(q ?? "", topK ? Number(topK) : 10);
   }
 }

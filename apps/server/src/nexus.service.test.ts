@@ -16,7 +16,10 @@ describe("NexusService task status events", () => {
     process.env.NEXUS_DB_PATH = join(root, "nexus.db");
     process.env.NEXUS_VAULT_PATH = join(root, "NEXUS-7");
     process.env.NEXUS_USER_ID = "server-test-host";
+    process.env.NEXUS_LLM_PROVIDER = "deterministic";
     process.env.ANTHROPIC_API_KEY = "";
+    process.env.ANTHROPIC_AUTH_TOKEN = "";
+    process.env.ANTHROPIC_BASE_URL = "";
 
     const service = new NexusService();
     try {

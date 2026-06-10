@@ -18,6 +18,8 @@ import { PlanningAgent } from "./planning-agent.js";
 import { ReviewAgent } from "./review-agent.js";
 
 class StaticLlmClient implements LlmClient {
+  readonly provider = "deterministic" as const;
+
   constructor(private readonly content: string) {}
 
   async complete(request: LlmRequest): Promise<LlmResponse> {
@@ -25,6 +27,9 @@ class StaticLlmClient implements LlmClient {
       content: this.content,
       model: `test-${request.modelTier}`,
       offline: true,
+      provider: this.provider,
+      stopReason: "test",
+      latencyMs: 1,
     };
   }
 }
@@ -109,6 +114,8 @@ function createTools() {
       return next;
     },
     createGoal: (goal) => goal as Goal,
+    updateGoalStatus: (goalId) => ({ id: goalId, status: "completed" }) as unknown as Goal,
+    updateProfile: (delta) => ({ ...profile, ...delta }) as Profile,
     updateTaskStatus: (taskId: string, status: TaskStatus) => {
       const task = tasks.find((item) => item.id === taskId);
       if (!task) throw new Error("task missing");
@@ -190,6 +197,43 @@ describe("structured agents", () => {
     expect(tasks).toHaveLength(1);
     expect(result.response).toContain("今日执行协议");
     expect(JSON.stringify(result.structured)).toContain("fallbackUsed");
+  });
+
+  it("parses Planning JSON inside a markdown fence", async () => {
+    const { tools, tasks, events } = createTools();
+    const agent = new PlanningAgent(
+      new StaticLlmClient(`\`\`\`json
+{
+  "data": {
+    "planTitle": "围栏协议",
+    "rationale": "真实模型偶尔会包 markdown fence。",
+    "tasks": [
+      {
+        "title": "验证 fenced JSON",
+        "description": "确认可解析",
+        "energyRequired": "low",
+        "estimatedMinutes": 15,
+        "acceptanceCriteria": "创建任务",
+        "proofMethod": "单测",
+        "rewardPoints": 5
+      }
+    ],
+    "risks": []
+  }
+}
+\`\`\``),
+      new ModelRouter(),
+      tools,
+    );
+
+    await agent.run(createContext());
+
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]?.title).toBe("验证 fenced JSON");
+    expect(events[0]?.rawPayload).toMatchObject({
+      promptVersion: "v0.2",
+      provider: "deterministic",
+    });
   });
 
   it("saves structured Review output", async () => {

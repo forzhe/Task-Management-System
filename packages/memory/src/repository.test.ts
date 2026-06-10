@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import { NexusRepository } from "./repository.js";
 
@@ -63,3 +64,60 @@ describe("NexusRepository task status flow", () => {
     }
   });
 });
+
+describe("NexusRepository schema bootstrap", () => {
+  it("creates the tables and key columns declared in the Drizzle baseline schema", async () => {
+    const root = await mkdtemp(join(tmpdir(), "nexus-memory-schema-"));
+    const dbPath = join(root, "nexus.db");
+    const repository = new NexusRepository({
+      dbPath,
+      userId: "memory-schema-test-host",
+    });
+    repository.close();
+
+    const db = new DatabaseSync(dbPath);
+    try {
+      const tables = new Set(
+        (
+          db
+            .prepare(
+              "select name from sqlite_master where type = 'table' and name not like 'sqlite_%'",
+            )
+            .all() as Array<{ name: string }>
+        ).map((row) => row.name),
+      );
+      expect(tables).toEqual(
+        new Set([
+          "users",
+          "profiles",
+          "goals",
+          "tasks",
+          "reviews",
+          "companions",
+          "events",
+          "system_evolution_logs",
+        ]),
+      );
+
+      expect(columnsFor(db, "tasks")).toEqual(
+        expect.arrayContaining(["actual_minutes", "evidence_json"]),
+      );
+      expect(columnsFor(db, "reviews")).toEqual(expect.arrayContaining(["emotion_tags"]));
+      expect(columnsFor(db, "events")).toEqual(
+        expect.arrayContaining(["raw_payload", "structured"]),
+      );
+      expect(columnsFor(db, "system_evolution_logs")).toEqual(
+        expect.arrayContaining(["rollback_available"]),
+      );
+    } finally {
+      db.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+function columnsFor(db: DatabaseSync, tableName: string): string[] {
+  return (db.prepare(`pragma table_info(${tableName})`).all() as Array<{ name: string }>).map(
+    (row) => row.name,
+  );
+}

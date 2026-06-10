@@ -1,10 +1,13 @@
 import type {
   AgentId,
   AgentOutputEnvelope,
+  CoachOutput,
   CompanionOutput,
   CompanionState,
+  InsightOutput,
   PlannedTask,
   PlanningOutput,
+  ReminderOutput,
   ReviewOutput,
 } from "@nexus/shared";
 import { z } from "zod";
@@ -138,6 +141,36 @@ export function fallbackReviewOutput(): ReviewOutput {
     emotionTags: [],
   };
 }
+
+export const insightOutputSchema = z.object({
+  coreInsight: z.string().trim().min(1),
+  patterns: z
+    .array(
+      z.object({
+        type: z.enum(["positive", "negative"]),
+        description: z.string().trim().min(1),
+      }),
+    )
+    .default([]),
+  calibrationSuggestion: z.string().trim().min(1),
+  credibilitySignal: z.enum(["high", "medium", "low"]).default("medium"),
+}) as z.ZodType<InsightOutput>;
+
+export const coachOutputSchema = z.object({
+  question: z.string().trim().min(1),
+  round: z.coerce.number().int().min(1).max(5).default(1),
+  readyToEvaluate: z.boolean().default(false),
+  impulseProbability: z.coerce.number().min(0).max(1).optional(),
+  recommendation: z.enum(["proceed", "defer_3days", "reframe"]).optional(),
+}) as z.ZodType<CoachOutput>;
+
+export const reminderOutputSchema = z.object({
+  shouldNotify: z.boolean(),
+  type: z
+    .enum(["task_due", "review_missed", "goal_stalled", "streak_at_risk", "none"])
+    .default("none"),
+  message: z.string().trim().default(""),
+}) as z.ZodType<ReminderOutput>;
 
 export function fallbackCompanionOutput(state: CompanionState = "idle"): CompanionOutput {
   return {

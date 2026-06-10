@@ -1,6 +1,7 @@
 import type { AgentContext, AgentResult } from "@nexus/shared";
-import type { LlmClient } from "../llm.js";
+import { type LlmClient, toLlmTrace } from "../llm.js";
 import type { ModelRouter } from "../model-router.js";
+import { getAgentPrompt } from "../prompt-registry.js";
 import {
   fallbackPlanningOutput,
   formatPlanningResponse,
@@ -18,14 +19,14 @@ export class PlanningAgent {
 
   async run(context: AgentContext): Promise<AgentResult> {
     const modelTier = this.router.route({ agentId: "planning", trigger: context.trigger });
+    const prompt = getAgentPrompt("planning");
     const response = await this.llm.complete({
       agentId: "planning",
       modelTier,
       messages: [
         {
           role: "system",
-          content:
-            "你是 NEXUS-7 规划 Agent。只返回 JSON，不要 Markdown。JSON 必须符合：{schemaVersion:1,agentId:'planning',summary:string,data:{planTitle:string,rationale:string,tasks:[{title,description,energyRequired:'low'|'medium'|'high',estimatedMinutes,acceptanceCriteria,proofMethod,rewardPoints}],risks:string[]},warnings:[],fallbackUsed:false}。生成 1-3 个少而精的今日执行协议。",
+          content: prompt.system,
         },
         {
           role: "user",
@@ -62,7 +63,7 @@ export class PlanningAgent {
       source: "planning-agent",
       type: "agent_output",
       category: "morning_plan",
-      rawPayload: { response: response.content },
+      rawPayload: { response: response.content, ...toLlmTrace(response, prompt.version) },
       structured: {
         output: envelope,
         createdTaskIds: tasks.map((task) => task.id),

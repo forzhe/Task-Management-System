@@ -2,6 +2,7 @@ import type {
   Companion,
   CompanionAction,
   Goal,
+  GoalStatus,
   NexusEvent,
   Profile,
   Review,
@@ -22,6 +23,8 @@ export interface NexusTools {
   ): NexusEvent;
   createTask(task: Pick<Task, "title"> & Partial<Task>): Task;
   createGoal(goal: Pick<Goal, "title" | "level"> & Partial<Goal>): Goal;
+  updateGoalStatus(goalId: string, status: GoalStatus): Goal;
+  updateProfile(delta: Partial<Omit<Profile, "userId" | "updatedAt" | "version">>): Profile;
   updateTaskStatus(taskId: string, status: TaskStatus, evidence?: TaskStatusUpdateEvidence): Task;
   saveReview(review: Omit<Review, "id" | "userId" | "createdAt"> & Partial<Review>): Review;
   getReview(reviewId: string): Review | null;

@@ -2,6 +2,8 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type {
+  AttributeKey,
+  AttributeSet,
   Companion,
   CompanionAction,
   Goal,
@@ -15,7 +17,7 @@ import type {
   TaskStatusUpdateEvidence,
   User,
 } from "@nexus/shared";
-import { DEFAULT_USER_ID } from "@nexus/shared";
+import { DEFAULT_USER_ID, EMPTY_ATTRIBUTES, calcLevel } from "@nexus/shared";
 
 const now = () => new Date().toISOString();
 const id = (prefix: string) => `${prefix}_${crypto.randomUUID()}`;
@@ -62,7 +64,60 @@ export class NexusRepository {
       currentLevel: Number(row.current_level),
       totalExp: Number(row.total_exp),
       credibilityScore: Number(row.credibility_score),
+      energyPoints: Number(row.energy_points ?? 0),
+      attributes: parseJson<AttributeSet>(row.attributes_json as string | null, {
+        ...EMPTY_ATTRIBUTES,
+      }),
     };
+  }
+
+  /**
+   * Apply task rewards on completion: add energyPoints + expRewards to attributes.
+   * Recalculates level from totalExp. Returns updated User.
+   */
+  applyTaskRewards(taskId: string): User {
+    const task = this.getTask(taskId);
+    if (!task) throw new Error(`Task ${taskId} not found`);
+    const user = this.getUser();
+    const gainedPoints = task.rewardPoints;
+    const newEnergyPoints = user.energyPoints + gainedPoints;
+
+    // Merge expRewards into attributes
+    const newAttributes = { ...user.attributes };
+    for (const [key, xp] of Object.entries(task.expRewards)) {
+      if (key in newAttributes) {
+        newAttributes[key as AttributeKey] = (newAttributes[key as AttributeKey] ?? 0) + Number(xp);
+      }
+    }
+    const earnedExp = Object.values(task.expRewards).reduce((s, v) => s + Number(v), 0);
+    const updatedTotalExp = user.totalExp + earnedExp;
+    const newLevel = calcLevel(updatedTotalExp);
+
+    this.db
+      .prepare(
+        `update users set
+          energy_points = ?,
+          total_exp = ?,
+          current_level = ?,
+          attributes_json = ?
+        where id = ?`,
+      )
+      .run(newEnergyPoints, updatedTotalExp, newLevel, toJson(newAttributes), this.userId);
+
+    return { ...user, energyPoints: newEnergyPoints, totalExp: updatedTotalExp, currentLevel: newLevel, attributes: newAttributes };
+  }
+
+  /**
+   * Adjust credibility score by delta (clamped 0–2).
+   * Pass a positive delta to reward, negative to penalise.
+   */
+  adjustCredibility(delta: number): User {
+    const user = this.getUser();
+    const next = Math.min(2, Math.max(0, user.credibilityScore + delta));
+    this.db
+      .prepare("update users set credibility_score = ? where id = ?")
+      .run(next, this.userId);
+    return { ...user, credibilityScore: next };
   }
 
   getProfile(): Profile {
@@ -167,6 +222,18 @@ export class NexusRepository {
         goal.updatedAt,
       );
     return goal;
+  }
+
+  updateGoalStatus(goalId: string, status: Goal["status"]): Goal {
+    const row = this.db
+      .prepare("select * from goals where id = ? and user_id = ?")
+      .get(goalId, this.userId) as Record<string, unknown> | undefined;
+    if (!row) throw new Error(`Goal ${goalId} not found`);
+    const updatedAt = now();
+    this.db
+      .prepare("update goals set status = ?, updated_at = ? where id = ? and user_id = ?")
+      .run(status, updatedAt, goalId, this.userId);
+    return this.mapGoal({ ...row, status, updated_at: updatedAt });
   }
 
   listTasks(status?: TaskStatus): Task[] {
@@ -341,6 +408,49 @@ export class NexusRepository {
     return rows.map((row) => this.mapEvent(row));
   }
 
+  searchMemory(query: string, topK = 10): NexusEvent[] {
+    const events = this.queryEvents(500);
+    if (!query.trim()) return events.slice(0, topK);
+
+    const tokens = query
+      .toLowerCase()
+      .split(/[\s,，。！？、；：]+/)
+      .filter((t) => t.length > 1);
+
+    const now = Date.now();
+    const DAY_MS = 86400000;
+
+    const scored = events.map((event) => {
+      const haystack = [
+        event.category ?? "",
+        event.source,
+        ...event.tags,
+        JSON.stringify(event.structured).toLowerCase(),
+      ]
+        .join(" ")
+        .toLowerCase();
+
+      let score = 0;
+      for (const token of tokens) {
+        const occurrences = haystack.split(token).length - 1;
+        score += occurrences;
+      }
+
+      // Recency bonus: events from last 7 days get extra weight
+      const ageDay = (now - new Date(event.occurredAt).getTime()) / DAY_MS;
+      const recencyBonus = Math.max(0, 1 - ageDay / 7) * 0.5;
+      score += recencyBonus;
+
+      return { event, score };
+    });
+
+    return scored
+      .filter(({ score }) => score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, topK)
+      .map(({ event }) => event);
+  }
+
   saveReview(input: Omit<Review, "id" | "userId" | "createdAt"> & Partial<Review>): Review {
     const review: Review = {
       id: input.id ?? id("review"),
@@ -430,7 +540,9 @@ export class NexusRepository {
         created_at text not null,
         current_level integer not null default 1,
         total_exp integer not null default 0,
-        credibility_score real not null default 1
+        credibility_score real not null default 1,
+        energy_points integer not null default 0,
+        attributes_json text not null default '{}'
       );
 
       create table if not exists profiles (
@@ -547,6 +659,13 @@ export class NexusRepository {
         rollback_available integer not null default 1
       );
     `);
+    // Incremental columns added after initial schema — safe to re-run
+    for (const stmt of [
+      `alter table users add column energy_points integer not null default 0`,
+      `alter table users add column attributes_json text not null default '{}'`,
+    ]) {
+      try { this.db.exec(stmt); } catch { /* column already exists */ }
+    }
   }
 
   private seedLocalUser(): void {
@@ -554,10 +673,10 @@ export class NexusRepository {
     this.db
       .prepare(
         `insert or ignore into users
-        (id, created_at, current_level, total_exp, credibility_score)
-        values (?, ?, 1, 0, 1)`,
+        (id, created_at, current_level, total_exp, credibility_score, energy_points, attributes_json)
+        values (?, ?, 1, 0, 1, 0, ?)`,
       )
-      .run(this.userId, timestamp);
+      .run(this.userId, timestamp, toJson({ ...EMPTY_ATTRIBUTES }));
 
     this.db
       .prepare(

@@ -6,7 +6,15 @@
     "useIgnoreFile": true
   },
   "files": {
-    "ignore": ["node_modules", "dist", ".turbo", "apps/desktop/src-tauri/target"]
+    "ignore": [
+      "node_modules",
+      "dist",
+      ".turbo",
+      ".tmp",
+      "playwright-report",
+      "test-results",
+      "apps/desktop/src-tauri/target"
+    ]
   },
   "formatter": {
     "enabled": true,

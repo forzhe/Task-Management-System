@@ -4,16 +4,21 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const apiMock = vi.hoisted(() => ({
   health: vi.fn(),
+  user: vi.fn(),
   profile: vi.fn(),
   goals: vi.fn(),
   tasks: vi.fn(),
   events: vi.fn(),
   latestReview: vi.fn(),
   companion: vi.fn(),
+  awStatus: vi.fn(),
   sendChat: vi.fn(),
   morningPlan: vi.fn(),
   dailyReview: vi.fn(),
   updateTask: vi.fn(),
+  weeklyInsight: vi.fn(),
+  coachSession: vi.fn(),
+  reminderCheck: vi.fn(),
 }));
 
 vi.mock("./api", () => ({ api: apiMock }));
@@ -90,16 +95,28 @@ const companion: Companion = {
   stateHistory: [],
 };
 
+const user = {
+  id: "desktop-test-host",
+  createdAt: "2026-05-11T00:00:00.000Z",
+  currentLevel: 1,
+  totalExp: 0,
+  credibilityScore: 1,
+  energyPoints: 0,
+  attributes: { intellect: 0, stamina: 0, focus: 0, willpower: 0, creativity: 0, order: 0 },
+};
+
 function mockRefreshPayload(
   overrides: Partial<{ tasks: Task[]; latestReview: Review | null }> = {},
 ) {
   apiMock.health.mockResolvedValue({ ok: true, offlineLlm: true });
+  apiMock.user.mockResolvedValue(user);
   apiMock.profile.mockResolvedValue(profile);
   apiMock.goals.mockResolvedValue([] satisfies Goal[]);
   apiMock.tasks.mockResolvedValue(overrides.tasks ?? [task]);
   apiMock.events.mockResolvedValue([] satisfies NexusEvent[]);
   apiMock.latestReview.mockResolvedValue(overrides.latestReview ?? review);
   apiMock.companion.mockResolvedValue(companion);
+  apiMock.awStatus.mockResolvedValue({ connected: false });
 }
 
 describe("nexus desktop store", () => {

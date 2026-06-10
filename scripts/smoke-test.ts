@@ -9,7 +9,10 @@ process.env.NEXUS_PORT = String(port);
 process.env.NEXUS_DB_PATH = join(smokeRoot, "nexus-smoke.db");
 process.env.NEXUS_VAULT_PATH = join(smokeRoot, "NEXUS-7");
 process.env.NEXUS_USER_ID = "smoke-host";
+process.env.NEXUS_LLM_PROVIDER = "deterministic";
 process.env.ANTHROPIC_API_KEY = "";
+process.env.ANTHROPIC_AUTH_TOKEN = "";
+process.env.ANTHROPIC_BASE_URL = "";
 
 interface TaskResponse {
   id: string;

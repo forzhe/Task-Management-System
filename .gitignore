@@ -10,3 +10,5 @@ dist/
 apps/desktop/src-tauri/target/
 **/NEXUS-7/
 .tmp/
+playwright-report/
+test-results/
