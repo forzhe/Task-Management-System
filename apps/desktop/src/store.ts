@@ -6,15 +6,18 @@ import type {
   InsightOutput,
   NexusEvent,
   Profile,
+  ProfileChangeProposal,
   ProfileUpdateInput,
   Review,
   Task,
   TaskStatus,
   TaskStatusUpdateEvidence,
   User,
+  UserStreak,
 } from "@nexus/shared";
+import type { CalendarEvent, ChoicePredictionOutput, DataImportResult, DeepAnalysis, Divergence, EvolutionProposal, FinanceSummary, HealthDaySummary, PathSimulationOutput, PeriodReport, RelationshipGraph, ShopView, StewardOutput } from "@nexus/shared";
 import { defineStore } from "pinia";
-import { api } from "./api";
+import { api, type NetGrowthSnapshot } from "./api";
 
 export interface ChatLine {
   role: "host" | "nexus";
@@ -37,18 +40,39 @@ export const useNexusStore = defineStore("nexus", {
     companion: null as Companion | null,
     chat: [] as ChatLine[],
     latestInsight: null as InsightOutput | null,
+    streaks: [] as UserStreak[],
+    profileChanges: [] as ProfileChangeProposal[],
+    netGrowth: null as NetGrowthSnapshot | null,
+    choicePrediction: null as ChoicePredictionOutput | null,
+    report: null as PeriodReport | null,
+    graph: null as RelationshipGraph | null,
+    pathSimulation: null as PathSimulationOutput | null,
+    recentHealth: [] as HealthDaySummary[],
+    lastHealthImport: null as DataImportResult | null,
+    upcomingCalendar: [] as CalendarEvent[],
+    financeSummary: null as FinanceSummary | null,
+    lastFinanceImport: null as DataImportResult | null,
+    healthSteward: null as StewardOutput | null,
+    learningSteward: null as StewardOutput | null,
+    divergences: [] as Divergence[],
+    shop: null as ShopView | null,
+    deepAnalysis: null as DeepAnalysis | null,
+    evolution: [] as EvolutionProposal[],
     error: "",
   }),
   getters: {
     completedToday: (state) => state.tasks.filter((task) => task.status === "completed").length,
     activeTasks: (state) => state.tasks.filter((task) => task.status !== "completed"),
+    // 首次启动仪式判定：档案未标记 onboarded 即视为未觉醒
+    needsOnboarding: (state) =>
+      state.profile !== null && state.profile.basicInfo?.onboarded !== true,
   },
   actions: {
     async refresh() {
       this.loading = true;
       this.error = "";
       try {
-        const [health, user, profile, goals, tasks, events, latestReview, companion] = await Promise.all([
+        const [health, user, profile, goals, tasks, events, latestReview, companion, streaks, profileChanges, netGrowth, report, graph, recentHealth, financeSummary, divergences, shop, upcomingCalendar, evolution] = await Promise.all([
           api.health(),
           api.user(),
           api.profile(),
@@ -57,6 +81,17 @@ export const useNexusStore = defineStore("nexus", {
           api.events(),
           api.latestReview(),
           api.companion(),
+          api.streaks(),
+          api.profileChanges(),
+          api.netGrowth(),
+          api.latestReport(),
+          api.graph(),
+          api.recentHealth(),
+          api.financeSummary(),
+          api.divergences(),
+          api.shop(),
+          api.upcomingCalendar(),
+          api.evolution(),
         ]);
         this.offlineLlm = health.offlineLlm;
         this.user = user;
@@ -66,6 +101,17 @@ export const useNexusStore = defineStore("nexus", {
         this.events = events;
         this.latestReview = latestReview;
         this.companion = companion;
+        this.streaks = streaks;
+        this.profileChanges = profileChanges;
+        this.netGrowth = netGrowth;
+        this.report = report;
+        this.graph = graph;
+        this.recentHealth = recentHealth;
+        this.financeSummary = financeSummary;
+        this.divergences = divergences;
+        this.shop = shop;
+        this.upcomingCalendar = upcomingCalendar;
+        this.evolution = evolution;
         // AW status is best-effort, never blocks the main refresh
         api
           .awStatus()
@@ -140,6 +186,273 @@ export const useNexusStore = defineStore("nexus", {
     async updateTaskStatus(id: string, status: TaskStatus, evidence?: TaskStatusUpdateEvidence) {
       try {
         await api.updateTask(id, status, evidence);
+        await this.refresh();
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    async simulatePath(scenario: string, paths: string[]) {
+      try {
+        const result = await api.simulatePath(scenario, paths);
+        this.captureResult(result);
+        const sim = (result.structured as Record<string, unknown>)?.pathSimulation;
+        if (sim) this.pathSimulation = sim as PathSimulationOutput;
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    async loadGraph() {
+      try {
+        this.graph = await api.graph();
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    async loadShop() {
+      try {
+        this.shop = await api.shop();
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    async loadDeepAnalysis() {
+      try {
+        this.deepAnalysis = await api.deepAnalysis();
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    async loadEvolution() {
+      try {
+        this.evolution = await api.evolution();
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    async runEvolution(targetKey: string) {
+      try {
+        await api.runEvolution(targetKey);
+        await this.loadEvolution();
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    async resolveEvolution(id: string, action: "apply" | "rollback" | "reject") {
+      try {
+        if (action === "apply") {
+          const r = await api.applyEvolution(id);
+          if (!r.ok && r.error) this.error = r.error;
+        } else if (action === "rollback") await api.rollbackEvolution(id);
+        else await api.rejectEvolution(id);
+        await this.loadEvolution();
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    async purchaseShopItem(itemId: string) {
+      try {
+        const result = await api.purchaseShopItem(itemId);
+        if (!result.ok && result.error) this.error = result.error;
+        await this.loadShop();
+        await this.refresh();
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    async equipSkin(skinId: string) {
+      try {
+        await api.equipSkin(skinId);
+        await this.loadShop();
+        await this.refresh();
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    async openDivergence(claim: string, evidence: string, domain?: string) {
+      try {
+        await api.openDivergence(claim, evidence, domain);
+        await this.refresh();
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    async resolveDivergence(id: string, outcome: "confirmed" | "refuted" | "withdrawn") {
+      try {
+        await api.resolveDivergence(id, outcome);
+        await this.refresh();
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    async loadHealth() {
+      try {
+        this.recentHealth = await api.recentHealth();
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    async loadCalendar() {
+      try {
+        this.upcomingCalendar = await api.upcomingCalendar();
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    async importCalendar(ics: string) {
+      try {
+        await api.importCalendar(ics);
+        await this.loadCalendar();
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    async runHealthSteward() {
+      try {
+        const result = await api.healthSteward();
+        this.captureResult(result);
+        const steward = (result.structured as Record<string, unknown>)?.steward;
+        if (steward) this.healthSteward = steward as StewardOutput;
+        await this.refresh();
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    async runLearningSteward() {
+      try {
+        const result = await api.learningSteward();
+        this.captureResult(result);
+        const steward = (result.structured as Record<string, unknown>)?.steward;
+        if (steward) this.learningSteward = steward as StewardOutput;
+        await this.refresh();
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    async runStewardSweep() {
+      try {
+        const result = await api.stewardSweep(true);
+        for (const s of result.outputs) {
+          if (s.domain === "health") this.healthSteward = s;
+          else if (s.domain === "learning") this.learningSteward = s;
+        }
+        if (result.companionLine && this.companion) {
+          this.companion = { ...this.companion, currentDialogue: result.companionLine };
+        }
+        await this.refresh();
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    async importHealth(csv: string) {
+      try {
+        this.lastHealthImport = await api.importHealth(csv);
+        await this.loadHealth();
+        await this.refresh();
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    async importFinance(csv: string) {
+      try {
+        this.lastFinanceImport = await api.importFinance(csv);
+        this.financeSummary = await api.financeSummary();
+        await this.refresh();
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    /** 首次启动仪式完成：写入采集到的档案 + 创建第一个目标 */
+    async completeOnboarding(payload: {
+      codename: string;
+      primaryChange: string;
+      idealDay: string;
+      failureHistory: string;
+      redLine: string;
+      personalityPreference: "strict" | "gentle";
+      yearGoal: string;
+      dailyCommitmentMinutes: number;
+      hostId: string;
+    }) {
+      try {
+        await api.updateProfile({
+          basicInfo: {
+            ...(this.profile?.basicInfo ?? {}),
+            codename: payload.codename || "宿主",
+            focus: payload.primaryChange,
+            onboarded: true,
+            hostId: payload.hostId,
+            personalityPreference: payload.personalityPreference,
+            dailyCommitmentMinutes: payload.dailyCommitmentMinutes,
+          },
+          motivations: {
+            ...(this.profile?.motivations ?? {}),
+            primaryChange: payload.primaryChange,
+          },
+          longTermVision: {
+            ...(this.profile?.longTermVision ?? {}),
+            idealDay: payload.idealDay,
+          },
+          traits: {
+            ...(this.profile?.traits ?? {}),
+            failureHistory: payload.failureHistory,
+          },
+          ...(payload.redLine ? { redLines: [payload.redLine] } : {}),
+        });
+        if (payload.yearGoal.trim()) {
+          await api.createGoal({ title: payload.yearGoal.trim(), level: "stage" });
+        }
+        await this.refresh();
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    async runReport(type: "weekly" | "monthly" | "quarterly" | "annual") {
+      try {
+        this.report = await api.runReport(type);
+        await this.refresh();
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    async loadReport(type: "weekly" | "monthly" | "quarterly" | "annual") {
+      try {
+        this.report = await api.latestReport(type);
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    async runNetGrowth() {
+      try {
+        const result = await api.runNetGrowth();
+        this.captureResult(result);
+        const ng = (result.structured as Record<string, unknown>)?.netGrowth;
+        if (ng) this.netGrowth = { ...(ng as NetGrowthSnapshot), at: new Date().toISOString() };
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    async predictChoice(question: string, options: string[]) {
+      try {
+        const result = await api.predictChoice(question, options);
+        this.captureResult(result);
+        const cp = (result.structured as Record<string, unknown>)?.choicePrediction;
+        if (cp) this.choicePrediction = cp as ChoicePredictionOutput;
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    async runProfileEvolution() {
+      try {
+        const result = await api.runProfileEvolution();
+        this.captureResult(result);
+        await this.refresh();
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    async resolveProfileChange(id: string, accept: boolean) {
+      try {
+        await api.resolveProfileChange(id, accept);
         await this.refresh();
       } catch (error) {
         this.error = error instanceof Error ? error.message : String(error);

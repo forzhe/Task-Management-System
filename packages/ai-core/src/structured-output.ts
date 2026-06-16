@@ -1,14 +1,21 @@
 import type {
   AgentId,
   AgentOutputEnvelope,
+  ChoicePredictionOutput,
   CoachOutput,
   CompanionOutput,
   CompanionState,
+  EvolutionOutput,
   InsightOutput,
+  NetGrowthOutput,
+  PathSimulationOutput,
+  PeriodReportOutput,
   PlannedTask,
   PlanningOutput,
+  ProfileEvolutionOutput,
   ReminderOutput,
   ReviewOutput,
+  StewardOutput,
 } from "@nexus/shared";
 import { z } from "zod";
 
@@ -46,7 +53,121 @@ export const reviewOutputSchema = z.object({
   risks: z.array(z.string().trim()).default([]),
   tomorrowAdjustment: z.string().trim().min(1),
   emotionTags: z.array(z.string().trim()).default([]),
+  keyMoment: z
+    .object({
+      type: z.enum(["low_point", "near_quit", "recovery", "peak", "promise"]),
+      summary: z.string().trim().min(1),
+      emotionalWeight: z.coerce.number().min(0).max(1).default(0.5),
+    })
+    .nullish()
+    .default(null),
 }) as z.ZodType<ReviewOutput>;
+
+/** §6.6.2 微洞察 / 断链分析的极简输出 */
+export const streakMessageSchema = z.object({
+  message: z.string().trim().min(1).transform((v) => v.slice(0, 200)),
+}) as z.ZodType<{ message: string }>;
+
+/** §8 Decision Agent：今日净成长值 */
+export const netGrowthSchema = z.object({
+  netValue: z.coerce.number().min(-100).max(100),
+  verdict: z.enum(["closer", "neutral", "further"]),
+  positives: z
+    .array(z.object({ label: z.string().trim().min(1), weight: z.coerce.number().min(0).max(100) }))
+    .default([]),
+  negatives: z
+    .array(z.object({ label: z.string().trim().min(1), weight: z.coerce.number().min(0).max(100) }))
+    .default([]),
+  summary: z.string().trim().min(1),
+}) as z.ZodType<NetGrowthOutput>;
+
+/** §9 Decision Agent：选择前预测 */
+export const choicePredictionSchema = z.object({
+  options: z
+    .array(
+      z.object({
+        label: z.string().trim().min(1),
+        alignmentScore: z.coerce.number().min(0).max(100),
+        shortTermCost: z.string().trim().default(""),
+        longTermGain: z.string().trim().default(""),
+        risk: z.string().trim().default(""),
+      }),
+    )
+    .min(1),
+  recommendation: z.string().trim().min(1),
+  warning: z.string().trim().optional(),
+}) as z.ZodType<ChoicePredictionOutput>;
+
+/** §9 人生路线模拟 */
+export const pathSimulationSchema = z.object({
+  paths: z
+    .array(
+      z.object({
+        label: z.string().trim().min(1),
+        trajectory: z
+          .array(
+            z.object({
+              horizon: z.string().trim().min(1),
+              state: z.string().trim().min(1),
+            }),
+          )
+          .default([]),
+        endState: z.string().trim().min(1),
+        alignmentScore: z.coerce.number().min(0).max(100),
+        keyRisks: z.array(z.string().trim()).default([]),
+      }),
+    )
+    .min(1),
+  divergencePoint: z.string().trim().min(1),
+  recommendation: z.string().trim().min(1),
+}) as z.ZodType<PathSimulationOutput>;
+
+/** §9 周期报告 LLM 叙事输出 */
+export const periodReportSchema = z.object({
+  headline: z.string().trim().min(1),
+  narrative: z.string().trim().min(1),
+  biggestWin: z.string().trim().min(1),
+  biggestLeak: z.string().trim().min(1),
+  nextFocus: z.string().trim().min(1),
+  trend: z.enum(["up", "flat", "down"]).default("flat"),
+}) as z.ZodType<PeriodReportOutput>;
+
+/** §6.4 系统进化引擎输出 */
+export const evolutionOutputSchema = z.object({
+  targetKey: z.string().trim().min(1),
+  changeNeeded: z.boolean(),
+  reason: z.string().trim().min(1),
+  newPrompt: z.string().trim().default(""),
+}) as z.ZodType<EvolutionOutput>;
+
+/** §6.7.3 辅助 Agent（健康管家等）统一输出 */
+export const stewardOutputSchema = z.object({
+  domain: z.enum(["health", "learning"]),
+  assessment: z.string().trim().min(1),
+  concernLevel: z.enum(["good", "watch", "alert"]).default("watch"),
+  nudge: z.string().trim().min(1),
+  companionLine: z
+    .string()
+    .trim()
+    .min(1)
+    .transform((v) => v.slice(0, 80)),
+}) as z.ZodType<StewardOutput>;
+
+/** §5.3 档案演化 Profile Agent 提议输出 */
+export const profileEvolutionSchema = z.object({
+  proposals: z
+    .array(
+      z.object({
+        field: z.enum(["basicInfo", "traits", "motivations", "redLines", "longTermVision"]),
+        subPath: z.string().trim().optional(),
+        currentValue: z.unknown().optional(),
+        proposedValue: z.unknown(),
+        reason: z.string().trim().min(1),
+        confidence: z.coerce.number().min(0).max(1).default(0.5),
+      }),
+    )
+    .default([]),
+}) as z.ZodType<ProfileEvolutionOutput>;
 
 export const companionOutputSchema = z.object({
   state: z.enum(companionStates as [CompanionState, ...CompanionState[]]).catch("idle"),

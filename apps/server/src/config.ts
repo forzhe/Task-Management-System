@@ -6,7 +6,9 @@ const optionalNonEmptyString = z.preprocess(
 );
 const providerSchema = z.preprocess(
   (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
-  z.enum(["auto", "deterministic", "anthropic", "openai", "gemini", "deepseek", "kimi"]).default("auto"),
+  z
+    .enum(["auto", "deterministic", "anthropic", "openai", "gemini", "deepseek", "kimi", "ollama"])
+    .default("auto"),
 );
 
 const envSchema = z.object({
@@ -34,6 +36,10 @@ const envSchema = z.object({
   DEEPSEEK_API_KEY: optionalNonEmptyString,
   // Kimi (Moonshot)
   KIMI_API_KEY: optionalNonEmptyString,
+  // ── 混合推理（本地 Ollama）P4-3 ──
+  NEXUS_LOCAL_LLM_MODEL: optionalNonEmptyString,
+  NEXUS_LOCAL_LLM_BASE_URL: optionalNonEmptyString,
+  NEXUS_LOCAL_LLM_TIERS: optionalNonEmptyString,
   NEXUS_AW_URL: z.string().default("http://localhost:5600"),
 });
 

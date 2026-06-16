@@ -72,6 +72,8 @@ export class ReviewAgent {
             browserVisits: context.browserVisits
               ? summarizeBrowserVisits(context.browserVisits)
               : null,
+            healthToday: context.healthToday ?? null,
+            financeRecent: context.financeRecent ?? null,
           }),
         },
       ],
@@ -121,6 +123,16 @@ export class ReviewAgent {
       relatedGoalIds: [],
       relatedTaskIds: context.currentTasks.map((task) => task.id),
     });
+
+    // §6.6.3：复盘判定为"关键时刻"时写入小人记忆（复用本次调用，零额外 LLM 成本）
+    if (envelope.data.keyMoment) {
+      this.tools.saveCompanionMemory({
+        type: envelope.data.keyMoment.type,
+        summary: envelope.data.keyMoment.summary,
+        refEventIds: [event.id],
+        emotionalWeight: envelope.data.keyMoment.emotionalWeight,
+      });
+    }
 
     return {
       response: formatReviewResponse(envelope.data),

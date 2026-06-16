@@ -1,15 +1,33 @@
-import type { AgentContext, AgentResult, BrowserVisitSummary, ScreenActivitySummary, TriggerKind } from "@nexus/shared";
+import type { AgentContext, AgentResult, BrowserVisitSummary, FinanceSummary, HealthDaySummary, ScreenActivitySummary, StewardOutput, TriggerKind } from "@nexus/shared";
 import { CompanionAgent } from "./agents/companion-agent.js";
 import { CoachAgent, type CoachSessionInput } from "./agents/coach-agent.js";
+import {
+  DecisionAgent,
+  type ChoicePredictionInput,
+  type PathSimulationInput,
+} from "./agents/decision-agent.js";
 import { DialogueAgent } from "./agents/dialogue-agent.js";
+import { EvolutionAgent, type EvolutionInput } from "./agents/evolution-agent.js";
+import { HealthStewardAgent, type HealthStewardInput } from "./agents/health-steward-agent.js";
 import { InsightAgent } from "./agents/insight-agent.js";
+import {
+  LearningStewardAgent,
+  type LearningStewardInput,
+} from "./agents/learning-steward-agent.js";
 import { PlanningAgent } from "./agents/planning-agent.js";
 import { ProfileAgent } from "./agents/profile-agent.js";
 import { ReminderAgent } from "./agents/reminder-agent.js";
+import { ReportAgent, type PeriodReportInput } from "./agents/report-agent.js";
 import { ReviewAgent } from "./agents/review-agent.js";
 import { SafetyAgent } from "./agents/safety-agent.js";
+import {
+  StreakAgent,
+  type StreakBreakInput,
+  type StreakMilestoneInput,
+} from "./agents/streak-agent.js";
 import type { LlmClient } from "./llm.js";
 import { ModelRouter } from "./model-router.js";
+import { aggregateStewardLines, aggregateStewardState } from "./steward-aggregate.js";
 import type { NexusTools } from "./tools.js";
 
 export class Orchestrator {
@@ -22,6 +40,12 @@ export class Orchestrator {
   private readonly insightAgent: InsightAgent;
   private readonly coachAgent: CoachAgent;
   private readonly reminderAgent: ReminderAgent;
+  private readonly streakAgent: StreakAgent;
+  private readonly decisionAgent: DecisionAgent;
+  private readonly reportAgent: ReportAgent;
+  private readonly healthSteward: HealthStewardAgent;
+  private readonly learningSteward: LearningStewardAgent;
+  private readonly evolutionAgent: EvolutionAgent;
   private readonly safetyAgent = new SafetyAgent();
 
   constructor(
@@ -32,17 +56,28 @@ export class Orchestrator {
     this.dialogueAgent = new DialogueAgent(llm, this.router, tools);
     this.planningAgent = new PlanningAgent(llm, this.router, tools);
     this.reviewAgent = new ReviewAgent(llm, this.router, tools);
-    this.profileAgent = new ProfileAgent(llm, this.router);
+    this.profileAgent = new ProfileAgent(llm, this.router, tools);
     this.companionAgent = new CompanionAgent(llm, this.router, tools);
     this.insightAgent = new InsightAgent(llm, this.router, tools);
     this.coachAgent = new CoachAgent(llm, this.router, tools);
     this.reminderAgent = new ReminderAgent(llm, this.router, tools);
+    this.streakAgent = new StreakAgent(llm, this.router, tools);
+    this.decisionAgent = new DecisionAgent(llm, this.router, tools);
+    this.reportAgent = new ReportAgent(llm, this.router, tools);
+    this.healthSteward = new HealthStewardAgent(llm, this.router, tools);
+    this.learningSteward = new LearningStewardAgent(llm, this.router, tools);
+    this.evolutionAgent = new EvolutionAgent(llm, this.router, tools);
   }
 
   async handle(
     trigger: TriggerKind,
     message?: string,
-    extras?: { screenActivity?: ScreenActivitySummary; browserVisits?: BrowserVisitSummary[] },
+    extras?: {
+      screenActivity?: ScreenActivitySummary;
+      browserVisits?: BrowserVisitSummary[];
+      healthToday?: HealthDaySummary;
+      financeRecent?: FinanceSummary;
+    },
   ): Promise<AgentResult> {
     const context = this.buildContext(trigger, message, extras);
     const primary = await this.dispatch(context);
@@ -64,9 +99,110 @@ export class Orchestrator {
     return this.coachAgent.run(context, session);
   }
 
-  async runReminderCheck(): Promise<AgentResult> {
-    const context = this.buildContext("reminder_check");
+  async runReminderCheck(hint?: string): Promise<AgentResult> {
+    const context = this.buildContext("reminder_check", hint);
     return this.reminderAgent.run(context);
+  }
+
+  async runStreakMilestone(input: StreakMilestoneInput): Promise<AgentResult> {
+    return this.streakAgent.runMilestone(input);
+  }
+
+  async runStreakBreak(input: StreakBreakInput): Promise<AgentResult> {
+    return this.streakAgent.runBreakAnalysis(input);
+  }
+
+  /** §5.3 档案演化扫描。deep=true 走 opus（月度深扫）*/
+  async runProfileEvolution(deep = false): Promise<AgentResult> {
+    const context = this.buildContext(deep ? "system" : "daily_review");
+    return this.profileAgent.run(context);
+  }
+
+  /** §8 今日净成长值 */
+  async runNetGrowth(): Promise<AgentResult> {
+    const context = this.buildContext("decision_analysis");
+    return this.decisionAgent.analyzeNetGrowth(context);
+  }
+
+  /** §9 选择前预测 */
+  async runChoicePrediction(input: ChoicePredictionInput): Promise<AgentResult> {
+    const context = this.buildContext("decision_analysis");
+    return this.decisionAgent.predictChoice(context, input);
+  }
+
+  /** §9 人生路线模拟 */
+  async runPathSimulation(input: PathSimulationInput): Promise<AgentResult> {
+    const context = this.buildContext("decision_analysis");
+    return this.decisionAgent.simulatePath(context, input);
+  }
+
+  /** §9 周期报告叙事（统计由 service 聚合后传入）*/
+  async runPeriodReport(input: PeriodReportInput) {
+    return this.reportAgent.run(input);
+  }
+
+  /** §6.7.3 健康管家（辅助 Agent，主小人统一转达）*/
+  async runHealthSteward(input: HealthStewardInput): Promise<AgentResult> {
+    const context = this.buildContext("companion_tick");
+    return this.healthSteward.run(context, input);
+  }
+
+  /** §6.7.3 学习教练（辅助 Agent，主小人统一转达）*/
+  async runLearningSteward(input: LearningStewardInput): Promise<AgentResult> {
+    const context = this.buildContext("companion_tick");
+    return this.learningSteward.run(context, input);
+  }
+
+  /** §6.4 系统进化引擎（仅提议）*/
+  async runEvolution(input: EvolutionInput): Promise<AgentResult> {
+    return this.evolutionAgent.run(input);
+  }
+
+  /**
+   * §6.7.3 场景路由 + 多 Agent 汇总：按 service 选定的领域跑对应辅助 Agent（静默），
+   * 再把它们的发现汇总成主小人的「一个声音」一次性发声。
+   */
+  async runStewardSweep(inputs: {
+    health?: HealthStewardInput;
+    learning?: LearningStewardInput;
+  }): Promise<{ outputs: StewardOutput[]; companionLine: string; domains: StewardOutput["domain"][] }> {
+    const context = this.buildContext("companion_tick");
+    const outputs: StewardOutput[] = [];
+
+    if (inputs.health) {
+      const r = await this.healthSteward.run(context, inputs.health, { speak: false });
+      const s = r.structured?.steward as StewardOutput | undefined;
+      if (s) outputs.push(s);
+    }
+    if (inputs.learning) {
+      const r = await this.learningSteward.run(context, inputs.learning, { speak: false });
+      const s = r.structured?.steward as StewardOutput | undefined;
+      if (s) outputs.push(s);
+    }
+
+    const companionLine = aggregateStewardLines(outputs);
+    if (companionLine) {
+      const companion = this.tools.getCompanion();
+      this.tools.triggerCompanion({
+        companionId: companion.id,
+        state: aggregateStewardState(outputs),
+        dialogue: companionLine,
+      });
+      this.tools.logEvent({
+        source: "orchestrator",
+        type: "agent_output",
+        category: "steward_sweep",
+        rawPayload: { domains: outputs.map((o) => o.domain) },
+        structured: { summary: companionLine, outputs },
+        occurredAt: new Date().toISOString(),
+        confidence: 0.85,
+        tags: ["steward", "sweep"],
+        relatedGoalIds: [],
+        relatedTaskIds: [],
+      });
+    }
+
+    return { outputs, companionLine, domains: outputs.map((o) => o.domain) };
   }
 
   private async dispatch(context: AgentContext): Promise<AgentResult> {
@@ -93,7 +229,12 @@ export class Orchestrator {
   private buildContext(
     trigger: TriggerKind,
     message?: string,
-    extras?: { screenActivity?: ScreenActivitySummary; browserVisits?: BrowserVisitSummary[] },
+    extras?: {
+      screenActivity?: ScreenActivitySummary;
+      browserVisits?: BrowserVisitSummary[];
+      healthToday?: HealthDaySummary;
+      financeRecent?: FinanceSummary;
+    },
   ): AgentContext {
     const profile = this.tools.getUserProfile();
     const profileSummary = [
@@ -111,8 +252,11 @@ export class Orchestrator {
       recentEvents: this.tools.queryEvents(20),
       activeGoals: this.tools.getActiveGoals(),
       currentTasks: this.tools.getCurrentTasks(),
+      calendarToday: this.tools.getTodayCalendar(),
       screenActivity: extras?.screenActivity,
       browserVisits: extras?.browserVisits,
+      healthToday: extras?.healthToday,
+      financeRecent: extras?.financeRecent,
     };
   }
 }

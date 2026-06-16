@@ -2,7 +2,14 @@ import Anthropic, { type ClientOptions } from "@anthropic-ai/sdk";
 import type { AgentId, ModelTier } from "@nexus/shared";
 import OpenAI from "openai";
 
-export type LlmProvider = "deterministic" | "anthropic" | "openai" | "gemini" | "deepseek" | "kimi";
+export type LlmProvider =
+  | "deterministic"
+  | "anthropic"
+  | "openai"
+  | "gemini"
+  | "deepseek"
+  | "kimi"
+  | "ollama";
 export type LlmProviderMode = "auto" | LlmProvider;
 
 export interface LlmMessage {
@@ -280,6 +287,11 @@ const PROVIDER_DEFAULTS: Record<OpenAICompatibleProvider, ProviderDefaults> = {
     baseURL: "https://api.moonshot.cn/v1",
     models: { haiku: "moonshot-v1-8k", sonnet: "moonshot-v1-32k", opus: "moonshot-v1-128k" },
   },
+  ollama: {
+    // 本地 Ollama 的 OpenAI 兼容端点；三档默认同一本地模型，由 models 覆盖
+    baseURL: "http://localhost:11434/v1",
+    models: { haiku: "qwen2.5:7b", sonnet: "qwen2.5:7b", opus: "qwen2.5:7b" },
+  },
 };
 
 export class OpenAICompatibleLlmClient implements LlmClient {
@@ -337,6 +349,36 @@ export class OpenAICompatibleLlmClient implements LlmClient {
   }
 }
 
+// ─── Hybrid (本地 + 云端混合推理，§6.4 P4-3) ─────────────────────────────────
+
+/**
+ * 混合推理客户端：把指定档位（默认 haiku 廉价高频）路由到本地模型，
+ * 其余走主云端模型。本地不可达时**优雅降级**回主模型——没装本地模型也不会坏。
+ * 服务 P4-3 混合推理 + P4-5 成本目标。
+ */
+export class HybridLlmClient implements LlmClient {
+  readonly provider: LlmProvider;
+  constructor(
+    private readonly primary: LlmClient,
+    private readonly local: LlmClient,
+    private readonly localTiers: ReadonlySet<ModelTier>,
+  ) {
+    this.provider = primary.provider;
+  }
+
+  async complete(request: LlmRequest): Promise<LlmResponse> {
+    if (this.localTiers.has(request.modelTier)) {
+      try {
+        return await this.local.complete(request);
+      } catch {
+        // 本地模型不可达（未运行/超时）→ 回落主模型，绝不让整链崩
+        return this.primary.complete(request);
+      }
+    }
+    return this.primary.complete(request);
+  }
+}
+
 // ─── Factory ──────────────────────────────────────────────────────────────────
 
 export interface CreateLlmClientOptions {
@@ -355,21 +397,42 @@ export interface CreateLlmClientOptions {
   deepseekApiKey?: string;
   // Kimi (Moonshot)
   kimiApiKey?: string;
+  // ── 混合推理（本地 Ollama）P4-3 ──
+  /** 本地模型名（如 qwen2.5:7b）。配置即启用混合推理，把 localTiers 路由到本地 */
+  localModel?: string;
+  /** 本地 OpenAI 兼容端点，默认 http://localhost:11434/v1 */
+  localBaseURL?: string;
+  /** 哪些档位走本地，默认 ["haiku"]（廉价高频）*/
+  localTiers?: ModelTier[];
 }
 
 export function createLlmClient(apiKey?: string): LlmClient;
 export function createLlmClient(options?: CreateLlmClientOptions): LlmClient;
 export function createLlmClient(input?: string | CreateLlmClientOptions): LlmClient {
   const options = typeof input === "string" ? { apiKey: input } : (input ?? {});
+  const primary = createPrimaryLlmClient(options);
+  return maybeWrapHybrid(primary, options);
+}
+
+/** 若配置了本地模型，把主客户端包成混合推理（haiku→本地，回落主模型）*/
+function maybeWrapHybrid(primary: LlmClient, options: CreateLlmClientOptions): LlmClient {
+  if (!options.localModel?.trim()) return primary;
+  const local = new OpenAICompatibleLlmClient(
+    "ollama",
+    "ollama", // Ollama 不需要 key，传占位符
+    { haiku: options.localModel, sonnet: options.localModel, opus: options.localModel },
+    options.localBaseURL,
+  );
+  const tiers = new Set<ModelTier>(options.localTiers ?? ["haiku"]);
+  return new HybridLlmClient(primary, local, tiers);
+}
+
+function createPrimaryLlmClient(options: CreateLlmClientOptions): LlmClient {
   const providerMode = options.provider ?? "auto";
   const models = options.models ?? {};
 
   if (providerMode === "deterministic") return new DeterministicLlmClient();
-
-  // Explicit provider
-  if (providerMode !== "auto") {
-    return buildExplicitProvider(providerMode, options, models);
-  }
+  if (providerMode !== "auto") return buildExplicitProvider(providerMode, options, models);
 
   // Auto-detect: first provider with a credential wins
   const anthropicCreds = normalizeAnthropicCredentials(options);
@@ -403,11 +466,16 @@ function buildExplicitProvider(
     }
     return new AnthropicLlmClient(creds, models);
   }
+  // Ollama 本地模型不需要 key
+  if (provider === "ollama") {
+    return new OpenAICompatibleLlmClient("ollama", "ollama", models, options.localBaseURL);
+  }
   const keyMap: Record<OpenAICompatibleProvider, string | undefined> = {
     openai: options.openaiApiKey,
     gemini: options.geminiApiKey,
     deepseek: options.deepseekApiKey,
     kimi: options.kimiApiKey,
+    ollama: "ollama",
   };
   const apiKey = keyMap[provider as OpenAICompatibleProvider];
   if (!apiKey) {
@@ -416,6 +484,7 @@ function buildExplicitProvider(
       gemini: "GEMINI_API_KEY",
       deepseek: "DEEPSEEK_API_KEY",
       kimi: "KIMI_API_KEY",
+      ollama: "(none)",
     };
     throw new Error(
       `NEXUS_LLM_PROVIDER=${provider} requires ${envMap[provider as OpenAICompatibleProvider]}.`,

@@ -20,6 +20,12 @@ export class CompanionAgent {
     const companion = this.tools.getCompanion();
     const prompt = getAgentPrompt("companion");
     const modelTier = this.router.route({ agentId: "companion", trigger: context.trigger });
+    // §6.6.3：注入历史记忆（最近 3 条 + 权重最高 2 条，< 150 token）
+    const memories = this.tools.getCompanionMemories().map((m) => ({
+      type: m.type,
+      summary: m.summary,
+      when: m.occurredAt.slice(0, 10),
+    }));
     const response = await this.llm.complete({
       agentId: "companion",
       modelTier,
@@ -34,6 +40,7 @@ export class CompanionAgent {
             trigger: context.trigger,
             message: context.message,
             currentTasks: context.currentTasks,
+            memories,
           }),
         },
       ],

@@ -12,7 +12,11 @@ export class ModelRouter {
     if (request.inputTokensEstimate && request.inputTokensEstimate > 50_000) return "opus";
     if (request.requiresDeepReasoning) return "opus";
     if (["review", "insight", "evolution"].includes(request.agentId)) return "opus";
-    if (["planning", "coach", "profile", "decision", "orchestrator"].includes(request.agentId)) {
+    if (
+      ["planning", "coach", "profile", "decision", "steward", "orchestrator"].includes(
+        request.agentId,
+      )
+    ) {
       return "sonnet";
     }
     return "haiku";

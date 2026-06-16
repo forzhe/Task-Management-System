@@ -34,6 +34,12 @@ export class PlanningAgent {
             profile: context.profileSummary,
             goals: context.activeGoals,
             recentEvents: context.recentEvents.slice(0, 5),
+            calendarToday: (context.calendarToday ?? []).map((c) => ({
+              title: c.title,
+              start: c.start,
+              end: c.end,
+              allDay: c.allDay,
+            })),
           }),
         },
       ],

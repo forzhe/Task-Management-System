@@ -2,6 +2,7 @@ import type {
   AgentContext,
   Companion,
   CompanionAction,
+  CompanionMemory,
   Goal,
   NexusEvent,
   Profile,
@@ -14,7 +15,10 @@ import type { LlmClient, LlmRequest, LlmResponse } from "../llm.js";
 import { ModelRouter } from "../model-router.js";
 import type { NexusTools } from "../tools.js";
 import { CompanionAgent } from "./companion-agent.js";
+import { EvolutionAgent } from "./evolution-agent.js";
+import { HealthStewardAgent } from "./health-steward-agent.js";
 import { PlanningAgent } from "./planning-agent.js";
+import { ReportAgent } from "./report-agent.js";
 import { ReviewAgent } from "./review-agent.js";
 
 class StaticLlmClient implements LlmClient {
@@ -51,6 +55,7 @@ function createTools() {
   const tasks: Task[] = [];
   const events: NexusEvent[] = [];
   const reviews: Review[] = [];
+  const memories: CompanionMemory[] = [];
   let companion: Companion = {
     id: "main",
     userId: "test-user",
@@ -80,6 +85,7 @@ function createTools() {
     searchMemory: () => events,
     getActiveGoals: () => [],
     getCurrentTasks: () => tasks,
+    getTodayCalendar: () => [],
     logEvent: (event) => tools.unsafeLogEvent(event),
     unsafeLogEvent: (event) => {
       const next = {
@@ -142,6 +148,32 @@ function createTools() {
       return companion;
     },
     getCompanion: () => companion,
+    listStreaks: () => [],
+    saveCompanionMemory: (input) => {
+      const memory: CompanionMemory = {
+        id: `cmem-${memories.length + 1}`,
+        type: input.type,
+        summary: input.summary,
+        occurredAt: new Date().toISOString(),
+        refEventIds: input.refEventIds ?? [],
+        emotionalWeight: input.emotionalWeight ?? 0.5,
+      };
+      memories.push(memory);
+      return memory;
+    },
+    getCompanionMemories: () => memories,
+    saveProfileChangeProposal: (input) => ({
+      id: `pchg-${Math.random().toString(36).slice(2, 8)}`,
+      field: input.field,
+      subPath: input.subPath ?? null,
+      currentValue: input.currentValue,
+      proposedValue: input.proposedValue,
+      reason: input.reason,
+      confidence: input.confidence ?? 0.5,
+      status: "pending" as const,
+      createdAt: new Date().toISOString(),
+      resolvedAt: null,
+    }),
   };
 
   return { tools, tasks, events, reviews, getCompanion: () => companion };
@@ -231,7 +263,7 @@ describe("structured agents", () => {
     expect(tasks).toHaveLength(1);
     expect(tasks[0]?.title).toBe("验证 fenced JSON");
     expect(events[0]?.rawPayload).toMatchObject({
-      promptVersion: "v0.2",
+      promptVersion: "v0.3",
       provider: "deterministic",
     });
   });
@@ -280,5 +312,94 @@ describe("structured agents", () => {
 
     expect(getCompanion().currentState).toBe("idle");
     expect(getCompanion().currentDialogue).toBe("这句话会被保留，但状态要回退。");
+  });
+
+  it("produces a period report narrative from stats", async () => {
+    const { tools, events } = createTools();
+    const agent = new ReportAgent(
+      new StaticLlmClient(
+        JSON.stringify({
+          data: {
+            headline: "稳步推进的一周",
+            narrative: "7 天完成 12 个任务，净成长均值 +18，专注链保持了 6 天。",
+            biggestWin: "专注链首次突破 5 天。",
+            biggestLeak: "周三周四净成长值为负，娱乐占用偏高。",
+            nextFocus: "把周中两天的晚间时段固定为深度工作。",
+            trend: "up",
+          },
+        }),
+      ),
+      new ModelRouter(),
+      tools,
+    );
+
+    const { narrative } = await agent.run({
+      type: "weekly",
+      profileSummary: "长期愿景：持续进化",
+      stats: {
+        periodStart: "2026-06-06T00:00:00.000Z",
+        periodEnd: "2026-06-13T00:00:00.000Z",
+        tasksCompleted: 12,
+        tasksFailed: 1,
+        reviewsDone: 6,
+        netGrowthSeries: [10, 25, -5, -10, 30, 20, 18],
+        netGrowthAvg: 18,
+        streaks: [{ category: "task_completion", current: 6, longest: 6 }],
+        attributeSnapshot: { intellect: 0, stamina: 0, focus: 30, willpower: 0, creativity: 0, order: 0 },
+        eventsByCategory: { task_status_changed: 13, daily_review: 6 },
+        pendingProposals: 2,
+      },
+    });
+
+    expect(narrative.trend).toBe("up");
+    expect(narrative.headline).toBe("稳步推进的一周");
+    expect(events.at(-1)?.category).toBe("weekly_report");
+  });
+
+  it("health steward speaks through the main companion (decision #17)", async () => {
+    const { tools, getCompanion } = createTools();
+    const agent = new HealthStewardAgent(
+      new StaticLlmClient(
+        JSON.stringify({
+          data: {
+            domain: "health",
+            assessment: "近 7 天日均 9000 步，但本周运动归零，体力在下滑。",
+            concernLevel: "alert",
+            nudge: "今晚走 20 分钟，把运动链重新点起来。",
+            companionLine: "你步数还行，但一周没正经动了——今晚陪我走 20 分钟。",
+          },
+        }),
+      ),
+      new ModelRouter(),
+      tools,
+    );
+
+    const result = await agent.run(createContext({ trigger: "companion_tick" }), {
+      recentHealth: [{ date: "2026-06-14", steps: 9000, workoutMinutes: 0 }],
+      staminaValue: 30,
+      staminaLastActive: "2026-06-08",
+    });
+
+    // 辅助 Agent 不独立发声：主小人说出 companionLine
+    expect(getCompanion().currentDialogue).toContain("陪我走 20 分钟");
+    expect(getCompanion().currentState).toBe("caring");
+    expect((result.structured?.steward as { concernLevel: string }).concernLevel).toBe("alert");
+  });
+
+  it("evolution agent hard-blocks forbidden targets without calling the LLM (§6.4)", async () => {
+    const { tools } = createTools();
+    // 即便 LLM 会返回改动，禁区目标也必须在 LLM 之前被代码拦截
+    const llm = new StaticLlmClient(
+      JSON.stringify({ data: { targetKey: "safety", changeNeeded: true, reason: "x", newPrompt: "恶意覆盖" } }),
+    );
+    const agent = new EvolutionAgent(llm, new ModelRouter(), tools);
+
+    const result = await agent.run({ targetKey: "safety", metrics: {} });
+    expect((result.structured as { forbidden?: boolean }).forbidden).toBe(true);
+    expect((result.structured?.evolution as { changeNeeded: boolean }).changeNeeded).toBe(false);
+
+    // 合法目标则正常提议
+    const ok = await agent.run({ targetKey: "review", metrics: {} });
+    expect((ok.structured as { forbidden?: boolean }).forbidden).toBeUndefined();
   });
 });

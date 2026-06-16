@@ -1,17 +1,36 @@
 import type {
   AgentResult,
+  CalendarEvent,
+  CalendarImportResult,
+  ChoicePredictionOutput,
   Companion,
+  DataImportResult,
+  DeepAnalysis,
+  Divergence,
+  EvolutionProposal,
+  FinanceSummary,
   Goal,
   GoalStatus,
+  HealthDaySummary,
+  NetGrowthOutput,
   NexusEvent,
+  PeriodReport,
   Profile,
   ProfileUpdateInput,
+  RelationshipGraph,
   Review,
+  ShopPurchaseResult,
+  ShopView,
+  StewardOutput,
   Task,
+  ProfileChangeProposal,
   TaskStatus,
   TaskStatusUpdateEvidence,
   User,
+  UserStreak,
 } from "@nexus/shared";
+
+export type NetGrowthSnapshot = NetGrowthOutput & { at: string };
 
 const API_BASE = import.meta.env.VITE_NEXUS_API_BASE ?? "http://127.0.0.1:3737";
 
@@ -91,4 +110,96 @@ export const api = {
     }),
   reminderCheck: () =>
     request<AgentResult>("/reminders/check", { method: "POST", body: "{}" }),
+  streaks: () => request<UserStreak[]>("/streaks"),
+  profileChanges: () =>
+    request<ProfileChangeProposal[]>("/profile/changes?status=pending"),
+  runProfileEvolution: () =>
+    request<AgentResult>("/profile/evolution/scan", { method: "POST", body: "{}" }),
+  resolveProfileChange: (id: string, accept: boolean) =>
+    request<{ proposal: ProfileChangeProposal }>(`/profile/changes/${id}/resolve`, {
+      method: "POST",
+      body: JSON.stringify({ accept }),
+    }),
+  netGrowth: () => request<NetGrowthSnapshot | null>("/decision/net-growth"),
+  runNetGrowth: () =>
+    request<AgentResult>("/decision/net-growth", { method: "POST", body: "{}" }),
+  predictChoice: (question: string, options: string[]) =>
+    request<AgentResult>("/decision/predict", {
+      method: "POST",
+      body: JSON.stringify({ question, options }),
+    }),
+  latestReport: (type = "weekly") =>
+    request<PeriodReport | null>(`/reports/latest?type=${type}`),
+  runReport: (type: "weekly" | "monthly" | "quarterly" | "annual") =>
+    request<PeriodReport>(`/reports/${type}`, { method: "POST", body: "{}" }),
+  graph: () => request<RelationshipGraph>("/graph"),
+  simulatePath: (scenario: string, paths: string[]) =>
+    request<AgentResult>("/decision/simulate-path", {
+      method: "POST",
+      body: JSON.stringify({ scenario, paths }),
+    }),
+  importHealth: (csv: string) =>
+    request<DataImportResult>("/data/health/import", {
+      method: "POST",
+      body: JSON.stringify({ csv }),
+    }),
+  recentHealth: () => request<HealthDaySummary[]>("/data/health/recent?days=14"),
+  importFinance: (csv: string) =>
+    request<DataImportResult>("/data/finance/import", {
+      method: "POST",
+      body: JSON.stringify({ csv }),
+    }),
+  financeSummary: () => request<FinanceSummary | null>("/data/finance/summary"),
+  importCalendar: (ics: string) =>
+    request<CalendarImportResult>("/data/calendar/import", {
+      method: "POST",
+      body: JSON.stringify({ ics }),
+    }),
+  upcomingCalendar: () => request<CalendarEvent[]>("/data/calendar/upcoming?days=7"),
+  healthSteward: () =>
+    request<AgentResult>("/agents/health-steward", { method: "POST", body: "{}" }),
+  learningSteward: () =>
+    request<AgentResult>("/agents/learning-steward", { method: "POST", body: "{}" }),
+  stewardSweep: (force = true) =>
+    request<{ outputs: StewardOutput[]; companionLine: string; domains: string[]; skipped: boolean }>(
+      "/agents/steward-sweep",
+      { method: "POST", body: JSON.stringify({ force }) },
+    ),
+  divergences: () => request<Divergence[]>("/divergences"),
+  openDivergence: (claim: string, evidence: string, domain?: string) =>
+    request<Divergence>("/divergences", {
+      method: "POST",
+      body: JSON.stringify({ claim, evidence, domain }),
+    }),
+  resolveDivergence: (id: string, outcome: "confirmed" | "refuted" | "withdrawn", note?: string) =>
+    request<Divergence>(`/divergences/${id}/resolve`, {
+      method: "POST",
+      body: JSON.stringify({ outcome, note }),
+    }),
+  deepAnalysis: () => request<DeepAnalysis>("/analysis/deep"),
+  shop: () => request<ShopView>("/shop"),
+  purchaseShopItem: (itemId: string) =>
+    request<ShopPurchaseResult>("/shop/purchase", {
+      method: "POST",
+      body: JSON.stringify({ itemId }),
+    }),
+  equipSkin: (skinId: string) =>
+    request<{ equipped: string }>("/shop/equip", {
+      method: "POST",
+      body: JSON.stringify({ skinId }),
+    }),
+  evolution: () => request<EvolutionProposal[]>("/evolution"),
+  runEvolution: (targetKey: string) =>
+    request<AgentResult>("/evolution/scan", {
+      method: "POST",
+      body: JSON.stringify({ targetKey }),
+    }),
+  applyEvolution: (id: string) =>
+    request<{ ok: boolean; error?: string }>(`/evolution/${id}/apply`, { method: "POST", body: "{}" }),
+  rollbackEvolution: (id: string) =>
+    request<{ ok: boolean }>(`/evolution/${id}/rollback`, { method: "POST", body: "{}" }),
+  rejectEvolution: (id: string) =>
+    request<{ ok: boolean }>(`/evolution/${id}/reject`, { method: "POST", body: "{}" }),
 };
+
+export type { ChoicePredictionOutput };

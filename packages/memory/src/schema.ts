@@ -1,4 +1,4 @@
-import { integer, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { integer, primaryKey, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 export const users = sqliteTable("users", {
   id: text("id").primaryKey(),
@@ -6,6 +6,9 @@ export const users = sqliteTable("users", {
   currentLevel: integer("current_level").notNull().default(1),
   totalExp: integer("total_exp").notNull().default(0),
   credibilityScore: real("credibility_score").notNull().default(1),
+  energyPoints: integer("energy_points").notNull().default(0),
+  attributesJson: text("attributes_json").notNull().default("{}"),
+  attributeMetaJson: text("attribute_meta_json").notNull().default("{}"),
 });
 
 export const profiles = sqliteTable("profiles", {
@@ -113,11 +116,75 @@ export const systemEvolutionLogs = sqliteTable("system_evolution_logs", {
   id: text("id").primaryKey(),
   evolutionAgentRunId: text("evolution_agent_run_id"),
   agentModified: text("agent_modified"),
+  targetKey: text("target_key"),
   changeType: text("change_type"),
   oldConfig: text("old_config"),
   newConfig: text("new_config"),
   reason: text("reason"),
   abTestMetric: text("ab_test_metric"),
+  status: text("status").notNull().default("proposed"),
+  createdAt: text("created_at"),
   appliedAt: text("applied_at"),
   rollbackAvailable: integer("rollback_available").notNull().default(1),
+});
+
+// ── 持续力引擎 §6.6 ────────────────────────────────────────────────
+
+export const userStreaks = sqliteTable(
+  "user_streaks",
+  {
+    userId: text("user_id").notNull(),
+    category: text("category").notNull(),
+    goalId: text("goal_id").notNull().default(""),
+    currentStreak: integer("current_streak").notNull().default(0),
+    longestStreak: integer("longest_streak").notNull().default(0),
+    lastActiveDate: text("last_active_date").notNull().default(""),
+    brokenAt: text("broken_at").notNull().default("[]"),
+  },
+  (table) => [primaryKey({ columns: [table.userId, table.category, table.goalId] })],
+);
+
+export const companionMemories = sqliteTable("companion_memories", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  type: text("type").notNull(),
+  summary: text("summary").notNull(),
+  occurredAt: text("occurred_at").notNull(),
+  refEventIds: text("ref_event_ids").notNull().default("[]"),
+  emotionalWeight: real("emotional_weight").notNull().default(0.5),
+});
+
+export const interventionLog = sqliteTable("intervention_log", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  signal: text("signal").notNull(),
+  firedDate: text("fired_date").notNull(),
+  responded: integer("responded").notNull().default(0),
+  createdAt: text("created_at").notNull(),
+});
+
+export const divergences = sqliteTable("divergences", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  claim: text("claim").notNull(),
+  evidence: text("evidence").notNull(),
+  domain: text("domain").notNull(),
+  status: text("status").notNull().default("open"),
+  createdAt: text("created_at").notNull(),
+  resolvedAt: text("resolved_at"),
+  resolutionNote: text("resolution_note"),
+});
+
+export const profileChangeLog = sqliteTable("profile_change_log", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  field: text("field").notNull(),
+  subPath: text("sub_path"),
+  currentValue: text("current_value"),
+  proposedValue: text("proposed_value"),
+  reason: text("reason").notNull(),
+  confidence: real("confidence").notNull().default(0.5),
+  status: text("status").notNull().default("pending"),
+  createdAt: text("created_at").notNull(),
+  resolvedAt: text("resolved_at"),
 });

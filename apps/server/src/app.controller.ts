@@ -130,4 +130,212 @@ export class AppController {
   searchMemory(@Query("q") q: string, @Query("topK") topK?: string) {
     return this.nexus.searchMemory(q ?? "", topK ? Number(topK) : 10);
   }
+
+  @Get("streaks")
+  listStreaks() {
+    return this.nexus.listStreaks();
+  }
+
+  @Post("interventions/check")
+  runInterventionCheck() {
+    return this.nexus.runInterventionCheck();
+  }
+
+  @Get("attributes/meta")
+  getAttributeMeta() {
+    return this.nexus.getAttributeMeta();
+  }
+
+  @Post("attributes/decay")
+  applyAttributeDecay() {
+    return this.nexus.applyAttributeDecay();
+  }
+
+  @Post("profile/evolution/scan")
+  runProfileEvolution(@Body() body: { deep?: boolean }) {
+    return this.nexus.runProfileEvolution(body?.deep ?? false);
+  }
+
+  @Get("profile/changes")
+  listProfileChanges(@Query("status") status?: "pending" | "accepted" | "rejected" | "rolled_back") {
+    return this.nexus.listProfileChanges(status);
+  }
+
+  @Post("profile/changes/:id/resolve")
+  resolveProfileChange(@Param("id") id: string, @Body() body: { accept: boolean }) {
+    return this.nexus.resolveProfileChange(id, body.accept);
+  }
+
+  @Get("decision/net-growth")
+  getLatestNetGrowth() {
+    return this.nexus.getLatestNetGrowth();
+  }
+
+  @Post("decision/net-growth")
+  runNetGrowth() {
+    return this.nexus.runNetGrowth();
+  }
+
+  @Post("decision/predict")
+  runChoicePrediction(@Body() body: { question: string; options: string[] }) {
+    return this.nexus.runChoicePrediction({
+      question: body.question,
+      options: body.options ?? [],
+    });
+  }
+
+  @Get("reports/latest")
+  getLatestReport(@Query("type") type?: ReviewType) {
+    return this.nexus.getLatestReport(type ?? "weekly");
+  }
+
+  @Post("reports/weekly")
+  runWeeklyReport() {
+    return this.nexus.runWeeklyReport();
+  }
+
+  @Post("reports/monthly")
+  runMonthlyReport() {
+    return this.nexus.runMonthlyReport();
+  }
+
+  @Post("reports/quarterly")
+  runQuarterlyReport() {
+    return this.nexus.runQuarterlyReport();
+  }
+
+  @Post("reports/annual")
+  runAnnualReport() {
+    return this.nexus.runAnnualReport();
+  }
+
+  @Post("decision/simulate-path")
+  runPathSimulation(@Body() body: { scenario: string; paths: string[] }) {
+    return this.nexus.runPathSimulation({
+      scenario: body.scenario,
+      paths: body.paths ?? [],
+    });
+  }
+
+  @Get("graph")
+  getRelationshipGraph() {
+    return this.nexus.getRelationshipGraph();
+  }
+
+  @Get("analysis/deep")
+  getDeepAnalysis(@Query("days") days?: string) {
+    return this.nexus.getDeepAnalysis(days ? Number(days) : 84);
+  }
+
+  @Post("memory/compact")
+  compactMemory() {
+    return this.nexus.compactMemory();
+  }
+
+  @Post("data/health/import")
+  importHealthCsv(@Body() body: { csv: string }) {
+    return this.nexus.importHealthCsv(body.csv ?? "");
+  }
+
+  @Get("data/health/recent")
+  getRecentHealth(@Query("days") days?: string) {
+    return this.nexus.getRecentHealth(days ? Number(days) : 14);
+  }
+
+  @Post("data/finance/import")
+  importFinanceCsv(@Body() body: { csv: string }) {
+    return this.nexus.importFinanceCsv(body.csv ?? "");
+  }
+
+  @Get("data/finance/summary")
+  getFinanceSummary() {
+    return this.nexus.getLatestFinanceSummary();
+  }
+
+  @Post("data/calendar/import")
+  importCalendarIcs(@Body() body: { ics: string }) {
+    return this.nexus.importCalendarIcs(body.ics ?? "");
+  }
+
+  @Get("data/calendar/upcoming")
+  getUpcomingCalendar(@Query("days") days?: string) {
+    return this.nexus.getUpcomingCalendar(days ? Number(days) : 7);
+  }
+
+  @Post("agents/health-steward")
+  runHealthSteward() {
+    return this.nexus.runHealthSteward();
+  }
+
+  @Post("agents/learning-steward")
+  runLearningSteward() {
+    return this.nexus.runLearningSteward();
+  }
+
+  @Post("agents/steward-sweep")
+  runStewardSweep(@Body() body?: { force?: boolean }) {
+    return this.nexus.runStewardSweep(body?.force ?? false);
+  }
+
+  @Get("divergences")
+  listDivergences(@Query("status") status?: "open" | "confirmed" | "refuted" | "withdrawn") {
+    return this.nexus.listDivergences(status);
+  }
+
+  @Post("divergences")
+  openDivergence(@Body() body: { claim: string; evidence: string; domain?: string }) {
+    return this.nexus.openDivergence({
+      claim: body.claim,
+      evidence: body.evidence,
+      domain: body.domain,
+    });
+  }
+
+  @Post("divergences/:id/resolve")
+  resolveDivergence(
+    @Param("id") id: string,
+    @Body() body: { outcome: "confirmed" | "refuted" | "withdrawn"; note?: string },
+  ) {
+    return this.nexus.resolveDivergence(id, body.outcome, body.note);
+  }
+
+  @Get("shop")
+  getShop() {
+    return this.nexus.getShop();
+  }
+
+  @Post("shop/purchase")
+  purchaseShopItem(@Body() body: { itemId: string }) {
+    return this.nexus.purchaseShopItem(body.itemId);
+  }
+
+  @Post("shop/equip")
+  equipSkin(@Body() body: { skinId: string }) {
+    return this.nexus.equipSkin(body.skinId);
+  }
+
+  @Get("evolution")
+  listEvolution(@Query("status") status?: "proposed" | "applied" | "rolled_back" | "rejected") {
+    return this.nexus.listEvolutionProposals(status);
+  }
+
+  @Post("evolution/scan")
+  runEvolution(@Body() body: { targetKey: string }) {
+    return this.nexus.runEvolution(body.targetKey);
+  }
+
+  @Post("evolution/:id/apply")
+  applyEvolution(@Param("id") id: string) {
+    return this.nexus.applyEvolution(id);
+  }
+
+  @Post("evolution/:id/rollback")
+  rollbackEvolution(@Param("id") id: string) {
+    return this.nexus.rollbackEvolution(id);
+  }
+
+  @Post("evolution/:id/reject")
+  rejectEvolution(@Param("id") id: string) {
+    return this.nexus.rejectEvolution(id);
+  }
 }

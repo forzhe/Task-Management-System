@@ -41,6 +41,7 @@ export class ReminderAgent {
           content: JSON.stringify({
             profileSummary: context.profileSummary,
             currentTime: now,
+            signalHint: context.message ?? null,
             overdueTasks: overdueTasks.map((t) => ({
               title: t.title,
               scheduledAt: t.scheduledAt,

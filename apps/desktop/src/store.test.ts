@@ -19,6 +19,38 @@ const apiMock = vi.hoisted(() => ({
   weeklyInsight: vi.fn(),
   coachSession: vi.fn(),
   reminderCheck: vi.fn(),
+  streaks: vi.fn(),
+  profileChanges: vi.fn(),
+  runProfileEvolution: vi.fn(),
+  resolveProfileChange: vi.fn(),
+  netGrowth: vi.fn(),
+  runNetGrowth: vi.fn(),
+  predictChoice: vi.fn(),
+  latestReport: vi.fn(),
+  runReport: vi.fn(),
+  graph: vi.fn(),
+  simulatePath: vi.fn(),
+  importHealth: vi.fn(),
+  recentHealth: vi.fn(),
+  importCalendar: vi.fn(),
+  upcomingCalendar: vi.fn(),
+  importFinance: vi.fn(),
+  financeSummary: vi.fn(),
+  healthSteward: vi.fn(),
+  learningSteward: vi.fn(),
+  stewardSweep: vi.fn(),
+  divergences: vi.fn(),
+  openDivergence: vi.fn(),
+  resolveDivergence: vi.fn(),
+  shop: vi.fn(),
+  purchaseShopItem: vi.fn(),
+  equipSkin: vi.fn(),
+  deepAnalysis: vi.fn(),
+  evolution: vi.fn(),
+  runEvolution: vi.fn(),
+  applyEvolution: vi.fn(),
+  rollbackEvolution: vi.fn(),
+  rejectEvolution: vi.fn(),
 }));
 
 vi.mock("./api", () => ({ api: apiMock }));
@@ -117,6 +149,23 @@ function mockRefreshPayload(
   apiMock.latestReview.mockResolvedValue(overrides.latestReview ?? review);
   apiMock.companion.mockResolvedValue(companion);
   apiMock.awStatus.mockResolvedValue({ connected: false });
+  apiMock.streaks.mockResolvedValue([]);
+  apiMock.profileChanges.mockResolvedValue([]);
+  apiMock.netGrowth.mockResolvedValue(null);
+  apiMock.latestReport.mockResolvedValue(null);
+  apiMock.graph.mockResolvedValue({ nodes: [], edges: [] });
+  apiMock.recentHealth.mockResolvedValue([]);
+  apiMock.upcomingCalendar.mockResolvedValue([]);
+  apiMock.financeSummary.mockResolvedValue(null);
+  apiMock.divergences.mockResolvedValue([]);
+  apiMock.evolution.mockResolvedValue([]);
+  apiMock.shop.mockResolvedValue({
+    catalog: [],
+    owned: [],
+    equipped: "default",
+    energyPoints: 0,
+    credibilityScore: 1,
+  });
 }
 
 describe("nexus desktop store", () => {
