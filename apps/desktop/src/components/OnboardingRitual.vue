@@ -21,27 +21,82 @@ interface Question {
   type: "text" | "textarea" | "choice" | "number";
   placeholder?: string;
   choices?: Array<{ label: string; value: string }>;
+  /** #4：这道题为什么问——直接显示给宿主，透明化 */
+  hint?: string;
+  /** #1：预设气泡胶囊，点一下即可填入，减少手写 */
+  presets?: string[];
+  /** #3：软上限字数，防止一大段堆砌 */
+  maxLen?: number;
 }
 const questions: Question[] = [
-  { key: "codename", prompt: "你叫什么？", type: "text", placeholder: "你的代号或称呼" },
-  { key: "primaryChange", prompt: "此刻，你最想改变自己的哪一件事？", type: "textarea", placeholder: "诚实地说" },
-  { key: "idealDay", prompt: "你理想中的一天，是什么样的？", type: "textarea", placeholder: "从早到晚，具体一点" },
-  { key: "failureHistory", prompt: "过去你尝试过几次改变却失败了？原因是什么？", type: "textarea", placeholder: "失败本身是数据，不是耻辱" },
-  { key: "redLine", prompt: "有没有一条你绝对不想做的事？", type: "text", placeholder: "你的红线" },
+  {
+    key: "codename",
+    prompt: "你叫什么？",
+    type: "text",
+    placeholder: "你的代号或称呼",
+    hint: "用来称呼你；之后系统所有对话都会用它。",
+    maxLen: 24,
+  },
+  {
+    key: "primaryChange",
+    prompt: "此刻，你最想改变自己的哪一件事？",
+    type: "textarea",
+    placeholder: "选一个，或自己写",
+    hint: "这会成为晨间规划的锚点——系统每天据此判断你有没有靠近它。",
+    presets: ["早睡早起、规律作息", "坚持运动、改善体力", "专注学习/备考、减少分心", "减少刷手机和拖延", "推进一个长期项目"],
+    maxLen: 200,
+  },
+  {
+    key: "idealDay",
+    prompt: "你理想中的一天，是什么样的？",
+    type: "textarea",
+    placeholder: "选一个，或具体描述",
+    hint: "净成长值与人生路线模拟都以「理想的一天」为参照系。",
+    presets: ["早起 → 专注工作 → 运动 → 早睡", "学习为主、张弛有度", "创作输出 + 留白思考", "稳定节律、少而精"],
+    maxLen: 200,
+  },
+  {
+    key: "failureHistory",
+    prompt: "过去你尝试改变却没坚持下来，通常卡在哪？",
+    type: "textarea",
+    placeholder: "选一个最像的，或补充",
+    hint: "失败模式帮系统提前预判你的卡点；这是数据，不是评判。",
+    presets: ["三分钟热度，撑不过一周", "计划太满，做不到就放弃", "靠意志硬扛，累了就垮", "没有反馈，看不到变化就停"],
+    maxLen: 200,
+  },
+  {
+    key: "redLine",
+    prompt: "有没有一条你绝对不想触碰的红线？",
+    type: "text",
+    placeholder: "可留空",
+    hint: "系统会在复盘/决策时对照红线提醒你；可留空。",
+    presets: ["不熬夜到凌晨", "不冲动消费", "不把任务变成机械打卡", "不逃避复盘"],
+    maxLen: 40,
+  },
   {
     key: "personalityPreference",
     prompt: "你懈怠时，希望 NEXUS-7 怎么对你？",
     type: "choice",
+    hint: "决定系统对你的语气——之后可在设置里调整。",
     choices: [
-      { label: "严厉直接", value: "strict" },
       { label: "温和陪伴", value: "gentle" },
+      { label: "直接克制", value: "strict" },
     ],
   },
-  { key: "yearGoal", prompt: "今年最重要的一个目标是什么？", type: "text", placeholder: "一个就好" },
+  {
+    key: "yearGoal",
+    prompt: "今年最重要的一个目标是什么？",
+    type: "text",
+    placeholder: "选一个，或自己写",
+    hint: "会自动建成你的第一个阶段目标。",
+    presets: ["考上研究生", "养成稳定运动习惯", "完成一个作品/项目", "存下一笔钱"],
+    maxLen: 40,
+  },
   {
     key: "dailyCommitmentMinutes",
     prompt: "你愿意每天花多少分钟和 NEXUS-7 互动？",
     type: "choice",
+    hint: "用于把控每日任务量，不贪多。",
     choices: [
       { label: "10 分钟", value: "10" },
       { label: "20 分钟", value: "20" },
@@ -98,10 +153,74 @@ function stopHeartbeat() {
   }
 }
 
+// ── 环境氛围音（Web Audio 合成的低频和声 pad，循环、可静音）#1 ──
+let ambientCtx: AudioContext | null = null;
+let ambientMaster: GainNode | null = null;
+let ambientOscs: OscillatorNode[] = [];
+const AMBIENT_VOL = 0.05;
+const muted = ref(localStorage.getItem("nexus-ritual-muted") === "1");
+
+function startAmbient() {
+  if (ambientCtx) return;
+  try {
+    const Ctx =
+      window.AudioContext ??
+      (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    ambientCtx = new Ctx();
+    ambientMaster = ambientCtx.createGain();
+    ambientMaster.gain.value = muted.value ? 0 : AMBIENT_VOL;
+    ambientMaster.connect(ambientCtx.destination);
+    ambientOscs = [110, 165, 220].map((f, i) => {
+      const osc = ambientCtx!.createOscillator();
+      osc.type = i === 0 ? "sine" : "triangle";
+      osc.frequency.value = f;
+      osc.detune.value = (i - 1) * 5;
+      const g = ambientCtx!.createGain();
+      g.gain.value = 0.4;
+      osc.connect(g);
+      g.connect(ambientMaster!);
+      osc.start();
+      return osc;
+    });
+  } catch {
+    /* 音频不可用则静默 */
+  }
+}
+
+function stopAmbient() {
+  for (const o of ambientOscs) {
+    try {
+      o.stop();
+    } catch {
+      /* already stopped */
+    }
+  }
+  ambientOscs = [];
+  if (ambientCtx) {
+    ambientCtx.close().catch(() => {});
+    ambientCtx = null;
+    ambientMaster = null;
+  }
+}
+
+function toggleMute() {
+  muted.value = !muted.value;
+  localStorage.setItem("nexus-ritual-muted", muted.value ? "1" : "0");
+  if (ambientCtx && ambientMaster) {
+    ambientMaster.gain.setValueAtTime(muted.value ? 0 : AMBIENT_VOL, ambientCtx.currentTime);
+  }
+}
+
+// #1：点预设胶囊直接填入答案，减少手写
+function applyPreset(text: string) {
+  currentInput.value = text;
+}
+
 // ── 流程驱动 ──
 function begin() {
   phase.value = "boot";
   startHeartbeat();
+  startAmbient();
   later(() => {
     phase.value = "scan";
     later(() => runDecode(), 2600);
@@ -136,7 +255,8 @@ function runDecode() {
 function submitAnswer() {
   const q = currentQuestion.value;
   if (!q) return;
-  const val = currentInput.value.trim();
+  // #3：去首尾空白 + 折叠多余空行，避免一大段堆砌
+  const val = currentInput.value.trim().replace(/\n{3,}/g, "\n\n");
   // 选择题在点击时已写入；其余必填校验从宽（红线可空）
   if (q.type !== "choice" && !val && q.key !== "redLine") return;
   if (q.type !== "choice") answers.value[q.key] = val;
@@ -184,7 +304,7 @@ function runProfileGen() {
 const companionFirstWords = computed(() => {
   const name = answers.value.codename || "宿主";
   const change = answers.value.primaryChange || "成为更好的自己";
-  return `${name}，我记下了。你说想改变的是「${change}」——从今天起，我会盯着你每一天有没有真的朝它靠近。不讨好，只诚实。`;
+  return `${name}，我记下了。你说想改变的是「${change}」——从今天起，我会陪你看每一天有没有真的朝它靠近，并如实告诉你进展。`;
 });
 
 async function finish() {
@@ -225,11 +345,25 @@ onMounted(() => {
 onBeforeUnmount(() => {
   for (const t of timers) clearTimeout(t);
   stopHeartbeat();
+  stopAmbient();
 });
 </script>
 
 <template>
   <div class="ritual-root" :class="phase">
+    <!-- 星空银河背景（#1）-->
+    <div class="ritual-starfield"></div>
+    <!-- 氛围音开关（#1）-->
+    <button
+      v-if="phase !== 'entry'"
+      class="ritual-mute"
+      type="button"
+      :title="muted ? '开启氛围音' : '静音'"
+      @click="toggleMute"
+    >
+      {{ muted ? "🔇" : "🔊" }}
+    </button>
+
     <!-- 扫描线 / 粒子背景 -->
     <div v-if="phase === 'scan' || phase === 'decode'" class="ritual-grid"></div>
     <div v-if="phase === 'scan'" class="ritual-scanline"></div>
@@ -263,6 +397,7 @@ onBeforeUnmount(() => {
     <div v-else-if="phase === 'dialogue'" class="ritual-center ritual-dialogue">
       <p class="ritual-progress-text">初始化档案 {{ qIndex + 1 }} / {{ questions.length }}</p>
       <h2 class="ritual-question">{{ currentQuestion?.prompt }}</h2>
+      <p v-if="currentQuestion?.hint" class="ritual-qhint">{{ currentQuestion.hint }}</p>
 
       <template v-if="currentQuestion?.type === 'choice'">
         <div class="ritual-choices">
@@ -278,11 +413,23 @@ onBeforeUnmount(() => {
         </div>
       </template>
       <template v-else>
+        <div v-if="currentQuestion?.presets?.length" class="ritual-presets">
+          <button
+            v-for="p in currentQuestion.presets"
+            :key="p"
+            type="button"
+            :class="['ritual-preset', { active: currentInput === p }]"
+            @click="applyPreset(p)"
+          >
+            {{ p }}
+          </button>
+        </div>
         <textarea
           v-if="currentQuestion?.type === 'textarea'"
           v-model="currentInput"
           class="ritual-input"
           rows="3"
+          :maxlength="currentQuestion?.maxLen"
           :placeholder="currentQuestion?.placeholder"
           @keydown.ctrl.enter="submitAnswer"
         />
@@ -290,12 +437,17 @@ onBeforeUnmount(() => {
           v-else
           v-model="currentInput"
           class="ritual-input"
+          :maxlength="currentQuestion?.maxLen"
           :placeholder="currentQuestion?.placeholder"
           @keyup.enter="submitAnswer"
         />
-        <button class="ritual-primary" type="button" @click="submitAnswer">
-          {{ qIndex < questions.length - 1 ? "下一题" : "提交" }}
-        </button>
+        <div class="ritual-actions-row">
+          <span v-if="currentQuestion?.maxLen" class="ritual-count">{{ currentInput.length }} / {{ currentQuestion.maxLen }}</span>
+          <button class="ritual-skip-q" type="button" @click="advance">跳过这题</button>
+          <button class="ritual-primary" type="button" @click="submitAnswer">
+            {{ qIndex < questions.length - 1 ? "下一题" : "提交" }}
+          </button>
+        </div>
       </template>
     </div>
 
@@ -365,6 +517,119 @@ onBeforeUnmount(() => {
   color: #8fd8cf;
 }
 .ritual-sub { color: #9cb8bc; font-size: 14px; margin: 0; }
+
+/* 星空银河背景（#1）*/
+.ritual-starfield {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 50% 38%, rgba(143, 216, 207, 0.1), transparent 45%),
+    radial-gradient(circle at 82% 78%, rgba(120, 160, 255, 0.08), transparent 42%);
+}
+.ritual-starfield::before,
+.ritual-starfield::after {
+  content: "";
+  position: absolute;
+  inset: -50%;
+  background-image:
+    radial-gradient(1.5px 1.5px at 10% 20%, #ffffff, transparent),
+    radial-gradient(1px 1px at 30% 70%, rgba(255, 255, 255, 0.8), transparent),
+    radial-gradient(1.5px 1.5px at 60% 40%, #ffffff, transparent),
+    radial-gradient(1px 1px at 80% 12%, rgba(255, 255, 255, 0.7), transparent),
+    radial-gradient(1px 1px at 90% 60%, #ffffff, transparent),
+    radial-gradient(1px 1px at 45% 85%, rgba(255, 255, 255, 0.7), transparent),
+    radial-gradient(1.5px 1.5px at 22% 55%, #ffffff, transparent),
+    radial-gradient(1px 1px at 68% 78%, rgba(255, 255, 255, 0.65), transparent);
+  background-repeat: repeat;
+  background-size: 320px 320px;
+  animation: ritual-drift 60s linear infinite, ritual-twinkle 5s ease-in-out infinite alternate;
+}
+.ritual-starfield::after {
+  background-size: 520px 520px;
+  opacity: 0.55;
+  animation-duration: 95s, 7s;
+}
+@keyframes ritual-drift {
+  from { transform: translateY(0); }
+  to { transform: translateY(-160px); }
+}
+@keyframes ritual-twinkle {
+  from { opacity: 0.5; }
+  to { opacity: 1; }
+}
+
+/* 氛围音开关 */
+.ritual-mute {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  z-index: 3;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 1px solid rgba(143, 216, 207, 0.3);
+  background: rgba(13, 25, 30, 0.7);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.ritual-mute:hover { border-color: #8fd8cf; }
+
+/* 题目 hint（#4）*/
+.ritual-qhint {
+  font-size: 12px;
+  color: #7faaa5;
+  line-height: 1.6;
+  margin: -4px 0 4px;
+  max-width: 460px;
+}
+
+/* 预设气泡胶囊（#1）*/
+.ritual-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  max-width: 520px;
+}
+.ritual-preset {
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(143, 216, 207, 0.28);
+  background: rgba(13, 25, 30, 0.7);
+  color: #c6d4d8;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.18s;
+}
+.ritual-preset:hover { border-color: #8fd8cf; color: #eef5ff; }
+.ritual-preset.active {
+  border-color: #ffcf75;
+  color: #ffcf75;
+  background: rgba(255, 207, 117, 0.12);
+}
+
+/* 提交行：字数 + 跳过 + 主按钮 */
+.ritual-actions-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.ritual-count {
+  font-size: 11px;
+  color: #4f6468;
+  font-variant-numeric: tabular-nums;
+}
+.ritual-skip-q {
+  background: none;
+  border: none;
+  color: #4f6468;
+  font-size: 12px;
+  cursor: pointer;
+}
+.ritual-skip-q:hover { color: #9cb8bc; }
 .ritual-faint { color: #6f8a8e; font-size: 14px; letter-spacing: 0.1em; margin: 0; }
 
 .ritual-pulse-orb,

@@ -5,6 +5,7 @@ import type {
   CoachOutput,
   CompanionOutput,
   CompanionState,
+  EconomyOutput,
   EvolutionOutput,
   InsightOutput,
   NetGrowthOutput,
@@ -18,6 +19,21 @@ import type {
   StewardOutput,
 } from "@nexus/shared";
 import { z } from "zod";
+
+const bountyValueTier = z.enum(["small", "light", "medium", "large", "major"]);
+const bountyAlignment = z.enum(["aligned", "neutral", "indulgent", "conflict"]);
+const bountyCategory = z.enum([
+  "electronics",
+  "food",
+  "apparel",
+  "entertainment",
+  "travel",
+  "learning",
+  "fitness",
+  "home",
+  "beauty",
+  "other",
+]);
 
 const companionStates: readonly CompanionState[] = [
   "idle",
@@ -168,6 +184,36 @@ export const profileEvolutionSchema = z.object({
     )
     .default([]),
 }) as z.ZodType<ProfileEvolutionOutput>;
+
+/** 经济官 Agent 输出（商城子系统规划书 §11 契约）*/
+export const economyOutputSchema = z.object({
+  appraisal: z.object({
+    valueTier: bountyValueTier.default("light"),
+    category: bountyCategory.default("other"),
+    estimatedValueCny: z.coerce.number().min(0).default(0),
+    estimatedBasis: z.string().trim().default(""),
+    needsClarification: z.boolean().default(false),
+    clarifyingQuestions: z.array(z.string().trim().min(1)).default([]),
+  }),
+  alignment: z.object({
+    verdict: bountyAlignment.default("neutral"),
+    relatedGoalIds: z.array(z.string().trim().min(1)).default([]),
+    redLineHit: z.boolean().default(false),
+    rationale: z.string().trim().default(""),
+  }),
+  judgment: z.object({
+    recommendedPrice: z.coerce.number().min(0).default(0),
+    impliedHorizonWeeks: z.coerce.number().min(0).default(0),
+    keyFactors: z.array(z.string().trim().min(1)).default([]),
+  }),
+  verdict: z.enum(["price", "clarify", "reject"]).default("price"),
+  companionLine: z
+    .string()
+    .trim()
+    .min(1)
+    .transform((v) => v.slice(0, 80)),
+  rejectReason: z.string().trim().optional(),
+}) as z.ZodType<EconomyOutput>;
 
 export const companionOutputSchema = z.object({
   state: z.enum(companionStates as [CompanionState, ...CompanionState[]]).catch("idle"),

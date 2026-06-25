@@ -14,6 +14,7 @@ export type AgentId =
   | "companion"
   | "decision"
   | "steward"
+  | "economy"
   | "evolution"
   | "safety";
 
@@ -67,6 +68,18 @@ export interface TaskStatusUpdateEvidence {
 export interface TaskStatusUpdateInput {
   status: TaskStatus;
   evidence?: TaskStatusUpdateEvidence;
+}
+
+/** §6.7 数据管理 / §6.4 计划编辑：可手动修改的任务字段 */
+export interface TaskEditInput {
+  title?: string;
+  description?: string;
+  energyRequired?: EnergyLevel;
+  estimatedMinutes?: number | null;
+  rewardPoints?: number;
+  acceptanceCriteria?: string;
+  proofMethod?: string;
+  goalId?: string | null;
 }
 
 export interface ProfileUpdateInput {
@@ -365,6 +378,216 @@ export interface ShopPurchaseResult {
   error?: string;
   itemId?: string;
   energyPoints?: number;
+}
+
+// ── 自定义悬赏与 AI 定价（商城子系统规划书 §1-11）──────────────────
+// 宿主只提需求，经济官独占定价（禁区⑦）。价格一口价、锁定即终局（无再改价）。
+
+/** 奖励价值层级（决定目标兑现周期，越高周期越长）*/
+export type BountyValueTier = "small" | "light" | "medium" | "large" | "major";
+
+/** 对齐判定：奖励与目标/红线的关系 */
+export type BountyAlignment = "aligned" | "neutral" | "indulgent" | "conflict";
+
+/** 奖励语义类别（按"是什么"分类，用于奖励库陈列）*/
+export type BountyCategory =
+  | "electronics" // 电子数码
+  | "food" // 美食
+  | "apparel" // 服饰鞋包
+  | "entertainment" // 娱乐游戏
+  | "travel" // 旅行出游
+  | "learning" // 学习成长
+  | "fitness" // 运动健康
+  | "home" // 居家生活
+  | "beauty" // 美妆个护
+  | "other"; // 其他
+
+export const BOUNTY_CATEGORY_LABELS: Record<BountyCategory, string> = {
+  electronics: "电子数码",
+  food: "美食",
+  apparel: "服饰鞋包",
+  entertainment: "娱乐游戏",
+  travel: "旅行出游",
+  learning: "学习成长",
+  fitness: "运动健康",
+  home: "居家生活",
+  beauty: "美妆个护",
+  other: "其他",
+};
+
+/** 悬赏契约生命周期（不可逆推进；priced 起锁价）*/
+export type BountyState =
+  | "appraising" // 经济官估值中
+  | "clarify" // 需宿主澄清
+  | "priced" // 已定价并锁定
+  | "saving" // 攒能量中（priced 后默认态）
+  | "redeemable" // 能量已够，可兑现
+  | "redeemed" // 已兑现（扣能量）
+  | "fulfilled" // 已确认现实兑现
+  | "rejected" // 红线/有害，拒绝纳入经济
+  | "abandoned"; // 宿主放弃
+
+export const BOUNTY_VALUE_TIER_LABELS: Record<BountyValueTier, string> = {
+  small: "小确幸",
+  light: "轻奖励",
+  medium: "中奖励",
+  large: "大奖励",
+  major: "重大奖励",
+};
+
+export const BOUNTY_STATE_LABELS: Record<BountyState, string> = {
+  appraising: "估值中",
+  clarify: "待澄清",
+  priced: "已定价",
+  saving: "攒能量中",
+  redeemable: "可兑现",
+  redeemed: "已兑现",
+  fulfilled: "已确认",
+  rejected: "已婉拒",
+  abandoned: "已放弃",
+};
+
+/**
+ * 价值层级 → 目标兑现周期带（周）。经济官估值的参考锚，也是确定性兜底的系数来源。
+ * mid 用于确定性公式取中值。
+ */
+export const BOUNTY_HORIZON_BY_TIER: Record<
+  BountyValueTier,
+  { minWeeks: number; maxWeeks: number; midWeeks: number; valueFloorCny: number }
+> = {
+  small: { minWeeks: 0.3, maxWeeks: 1, midWeeks: 0.6, valueFloorCny: 0 },
+  light: { minWeeks: 1, maxWeeks: 3, midWeeks: 2, valueFloorCny: 50 },
+  medium: { minWeeks: 3, maxWeeks: 8, midWeeks: 5, valueFloorCny: 300 },
+  large: { minWeeks: 8, maxWeeks: 16, midWeeks: 12, valueFloorCny: 1500 },
+  major: { minWeeks: 16, maxWeeks: 28, midWeeks: 20, valueFloorCny: 6000 },
+};
+
+/** 全局护栏：隐含兑现周期被夹逼在此区间，防止「秒到手」或「天价」*/
+export const BOUNTY_HORIZON_FLOOR_WEEKS = 0.3;
+export const BOUNTY_HORIZON_CEILING_WEEKS = 28;
+
+/** 可信度危机线：低于此值暂停开新悬赏（呼应 §6.1 积分暂停）*/
+export const BOUNTY_MIN_CREDIBILITY = 0.5;
+
+/** 新宿主无赚取历史时的兜底周赚取率（能量点/周）*/
+export const BOUNTY_DEFAULT_WEEKLY_RATE = 200;
+
+/** 节奏漂移再校准：赚取率漂移达此倍数（上或下）才重定价（滞回，防抖）*/
+export const BOUNTY_REPRICE_DRIFT_FACTOR = 2.5;
+
+/** 临门一脚锁定：进度达此比例（或已可兑换）即永久锁价，绝不再上调 */
+export const BOUNTY_REPRICE_LOCK_PROGRESS = 0.9;
+
+/** 定价依据（可回溯，宿主只读，禁区⑦）*/
+export interface BountyPriceBreakdown {
+  /** 可持续周赚取率（定价那一刻；再校准时作为漂移基准）*/
+  rWeek: number;
+  /** 最终价格隐含的兑现周期（周）= 这条悬赏的「努力锚」，再校准保持不变 */
+  impliedHorizonWeeks: number;
+  /** 经济官综合评判的关键因子 */
+  keyFactors: string[];
+  /** 护栏是否生效 */
+  clampApplied: "none" | "floor" | "ceiling";
+  /** 是否走了确定性兜底（离线/解析失败）*/
+  offlineFallback: boolean;
+  /** 临门一脚锁定后为 true：价格永久冻结，不再被再校准 */
+  locked?: boolean;
+  /** 最近一次再校准时间（节奏漂移触发）*/
+  repricedAt?: ISODateTime | null;
+  /** 最近一次再校准前的价格（卡片上展示 旧→新）*/
+  repriceFrom?: number | null;
+}
+
+/** 一条悬赏契约 */
+export interface Bounty {
+  id: string;
+  userId: string;
+  /** 宿主心愿描述 */
+  title: string;
+  /** 宿主补充：理由 / 参考价 / 链接（可选）*/
+  hostNote?: string | null;
+  valueTier: BountyValueTier;
+  /** 语义类别（按"是什么"分类，用于奖励库陈列）*/
+  category: BountyCategory;
+  estimatedValueCny: number;
+  alignment: BountyAlignment;
+  relatedGoalIds: string[];
+  /** 锁定的悬赏能量，经济官独占写入、宿主不可改 */
+  price: number;
+  priceBreakdown: BountyPriceBreakdown;
+  state: BountyState;
+  /** 主小人口吻的一句估值说明 */
+  companionLine: string;
+  rejectReason?: string | null;
+  /** 兑现凭证（可选，§8）*/
+  evidenceRef?: string | null;
+  createdAt: ISODateTime;
+  pricedAt?: ISODateTime | null;
+  redeemedAt?: ISODateTime | null;
+  fulfilledAt?: ISODateTime | null;
+}
+
+/** 心愿单视图：契约列表 + 宿主当前能量/可信度（前端算进度）*/
+export interface BountyView {
+  bounties: Bounty[];
+  energyPoints: number;
+  credibilityScore: number;
+  /** 当前进行中（攒能量/可兑现）的悬赏数，仅供展示，无上限 */
+  activeCount: number;
+}
+
+/** 提交心愿/兑现等操作的统一结果 */
+export interface BountyActionResult {
+  ok: boolean;
+  error?: string;
+  bounty?: Bounty;
+  energyPoints?: number;
+}
+
+/** 提交心愿（估值）的结果：经济官一次综合评判后给定价/澄清/婉拒 */
+export interface BountyProposeResult {
+  ok: boolean;
+  verdict: "price" | "clarify" | "reject";
+  /** 已定价时返回新建的契约 */
+  bounty?: Bounty;
+  /** 需澄清时返回问题（宿主补充后重新提交）*/
+  clarifyingQuestions?: string[];
+  /** 主小人口吻的一句话 */
+  companionLine: string;
+  rejectReason?: string;
+  /** 受理失败（前置校验，如冷却/并发/可信度）*/
+  error?: string;
+}
+
+/**
+ * 经济官 Agent 的结构化输出（§11 契约）。经济官综合评判后给出 recommendedPrice，
+ * 定价引擎再施加护栏夹逼。verdict=clarify 时只返回澄清问题；reject 时给 rejectReason。
+ */
+export interface EconomyOutput {
+  appraisal: {
+    valueTier: BountyValueTier;
+    category: BountyCategory;
+    estimatedValueCny: number;
+    estimatedBasis: string;
+    needsClarification: boolean;
+    clarifyingQuestions: string[];
+  };
+  alignment: {
+    verdict: BountyAlignment;
+    relatedGoalIds: string[];
+    redLineHit: boolean;
+    rationale: string;
+  };
+  judgment: {
+    /** 经济官自主综合评判的价格（未夹逼）*/
+    recommendedPrice: number;
+    impliedHorizonWeeks: number;
+    keyFactors: string[];
+  };
+  verdict: "price" | "clarify" | "reject";
+  /** 主小人口吻的一句话 */
+  companionLine: string;
+  rejectReason?: string;
 }
 
 // ── 深度长期趋势 §7.3 Lv.50 ────────────────────────────────────────
@@ -921,6 +1144,10 @@ export interface AgentContext {
   financeRecent?: FinanceSummary;
   /** §6.7 全域感知：今日日历（晨间规划上下文 + 复盘客观锚点）*/
   calendarToday?: CalendarEvent[];
+  /** §6.4 #12：本次调用的模型档位覆盖（宿主在重做时手动指定）*/
+  modelTierOverride?: ModelTier;
+  /** §6.4 #12：本次调用的具体模型名覆盖（如 deepseek-reasoner）*/
+  modelOverride?: string;
 }
 
 export interface CompanionAction {

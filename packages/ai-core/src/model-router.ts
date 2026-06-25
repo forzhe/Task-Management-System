@@ -13,7 +13,7 @@ export class ModelRouter {
     if (request.requiresDeepReasoning) return "opus";
     if (["review", "insight", "evolution"].includes(request.agentId)) return "opus";
     if (
-      ["planning", "coach", "profile", "decision", "steward", "orchestrator"].includes(
+      ["planning", "coach", "profile", "decision", "steward", "economy", "orchestrator"].includes(
         request.agentId,
       )
     ) {

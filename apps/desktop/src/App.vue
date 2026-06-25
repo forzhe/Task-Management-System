@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import type { AttributeKey, FeatureKey, GoalLevel, NexusEvent, ProfileChangeProposal, Review, Task, TaskStatus, TaskStatusUpdateEvidence, UserStreak } from "@nexus/shared";
-import { ATTRIBUTE_LABELS, DIVERGENCE_STATUS_LABELS, NET_GROWTH_VERDICT_LABELS, PERIOD_TREND_LABELS, STREAK_LABELS, UNLOCK_LABELS, UNLOCK_LEVELS, isFeatureUnlocked, xpToNextLevel } from "@nexus/shared";
+import type { AttributeKey, Bounty, BountyCategory, FeatureKey, GoalLevel, NexusEvent, ProfileChangeProposal, Review, Task, TaskStatus, TaskStatusUpdateEvidence, UserStreak } from "@nexus/shared";
+import { ATTRIBUTE_LABELS, BOUNTY_CATEGORY_LABELS, BOUNTY_STATE_LABELS, DIVERGENCE_STATUS_LABELS, NET_GROWTH_VERDICT_LABELS, PERIOD_TREND_LABELS, STREAK_LABELS, UNLOCK_LABELS, UNLOCK_LEVELS, isFeatureUnlocked, xpToNextLevel } from "@nexus/shared";
 import {
   Activity,
+  AlertTriangle,
+  ArrowUpDown,
   Bot,
   Brain,
   Check,
@@ -12,18 +14,34 @@ import {
   FileText,
   Flag,
   Flame,
+  Image as ImageIcon,
+  LayoutDashboard,
   Link as LinkIcon,
-  MessageSquare,
   Moon,
   Pause,
   Play,
   BookOpen,
+  CalendarCheck,
   CalendarRange,
   GraduationCap,
   HeartPulse,
   CalendarClock,
+  ChevronLeft,
+  ChevronRight,
+  Database,
   Dna,
+  Dumbbell,
+  Flower2,
+  Gamepad2,
   Gavel,
+  Gift,
+  Palette,
+  Plane,
+  Shirt,
+  Smartphone,
+  Sofa,
+  UtensilsCrossed,
+  Trash2,
   LineChart,
   Network,
   Stethoscope,
@@ -33,8 +51,8 @@ import {
   Route,
   Scale,
   ScrollText,
-  Send,
   Split,
+  Timer,
   TrendingDown,
   Unlock,
   Sparkles,
@@ -45,10 +63,13 @@ import {
   X,
   Zap,
 } from "lucide-vue-next";
-import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
+import { type Component, computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import FloatingCompanion from "./components/FloatingCompanion.vue";
+import FocusTimer from "./components/FocusTimer.vue";
+import GuideTour from "./components/GuideTour.vue";
 import Live2DStage from "./components/Live2DStage.vue";
 import OnboardingRitual from "./components/OnboardingRitual.vue";
+import { useFocusTimer } from "./focus-timer";
 import { isTauri } from "./tauri-env";
 
 const native = isTauri();
@@ -70,6 +91,8 @@ watch(
 function toggleTheme() {
   isLight.value = !isLight.value;
 }
+import { api, assetUrl, isBusy } from "./api";
+import ChatWindow from "./components/ChatWindow.vue";
 import { useNexusStore } from "./store";
 
 interface EvidenceDraft {
@@ -79,9 +102,53 @@ interface EvidenceDraft {
 }
 
 const store = useNexusStore();
+const focusTimer = useFocusTimer();
+function startFocus(task: Task) {
+  // 专注 = 进入深度模式：立刻起计时，并把任务设为进行中（合并「开始」）
+  focusTimer.start(task.id, task.title);
+  if (task.status !== "in_progress" && task.status !== "completed") {
+    void store.updateTaskStatus(task.id, "in_progress");
+  }
+}
+
+// 进行中任务的实时计时：每秒走一次的 now，驱动"已进行 / 剩余"显示
+const nowMs = ref(Date.now());
+let clockTimer: ReturnType<typeof setInterval> | null = null;
+onMounted(() => {
+  clockTimer = setInterval(() => {
+    nowMs.value = Date.now();
+  }, 1000);
+});
+onUnmounted(() => {
+  if (clockTimer) clearInterval(clockTimer);
+});
+function taskElapsedSec(task: Task): number {
+  if (!task.startedAt) return 0;
+  return Math.max(0, Math.floor((nowMs.value - new Date(task.startedAt).getTime()) / 1000));
+}
+function fmtDuration(sec: number): string {
+  return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
+}
+function taskRunProgress(task: Task): number {
+  if (!task.estimatedMinutes) return 0;
+  return Math.min(1, taskElapsedSec(task) / 60 / task.estimatedMinutes);
+}
+function taskOvertime(task: Task): boolean {
+  return !!task.estimatedMinutes && taskElapsedSec(task) / 60 > task.estimatedMinutes;
+}
+function taskRemainLabel(task: Task): string {
+  if (!task.estimatedMinutes) return "";
+  const remain = task.estimatedMinutes - taskElapsedSec(task) / 60;
+  return remain >= 0 ? `剩 ${Math.ceil(remain)} 分钟` : `超时 ${Math.floor(-remain)} 分钟`;
+}
+
 const ritualDismissed = ref(false);
 const showOnboarding = computed(() => store.needsOnboarding && !ritualDismissed.value);
-const message = ref("");
+// #6 新手指引：已 onboarded、档案就绪、且没看过指引时显示
+const guideSeen = ref(localStorage.getItem("nexus-guide-seen") === "1");
+const showGuide = computed(
+  () => !guideSeen.value && store.profile !== null && !store.needsOnboarding && !showOnboarding.value,
+);
 const reviewNote = ref("");
 const evidenceDrafts = reactive<Record<string, EvidenceDraft>>({});
 const showGoalForm = ref(false);
@@ -95,6 +162,104 @@ const goalLevelLabel: Record<GoalLevel, string> = {
   weekly: "周",
   daily: "日",
 };
+
+// ── 自定义悬赏与 AI 定价（商城子系统）──────────────────────────────
+const showWishForm = ref(false);
+const wishTitle = ref("");
+const wishNote = ref("");
+const wishReference = ref("");
+async function submitWish() {
+  const title = wishTitle.value.trim();
+  if (!title) return;
+  const refPrice = Number(wishReference.value);
+  const result = await store.proposeBounty(
+    title,
+    wishNote.value.trim() || undefined,
+    Number.isFinite(refPrice) && refPrice > 0 ? refPrice : undefined,
+  );
+  // 定价/婉拒后清空表单；澄清则保留，待宿主补充后重提
+  if (result && result.verdict !== "clarify") {
+    wishTitle.value = "";
+    wishNote.value = "";
+    wishReference.value = "";
+    showWishForm.value = false;
+  }
+}
+/** 心愿进度：当前能量 / 价格（0..1）*/
+function bountyProgress(price: number): number {
+  const energy = store.bounties?.energyPoints ?? 0;
+  if (price <= 0) return 1;
+  return Math.min(1, energy / price);
+}
+/** 近 14 天内被节奏漂移再校准过 → 卡片上提示 */
+function recentlyRepriced(b: Bounty): boolean {
+  const at = b.priceBreakdown.repricedAt;
+  return !!at && Date.now() - new Date(at).getTime() < 14 * 86400000;
+}
+// 分类顺序 + 每类一个 lucide 图标（充当商品「图」，京东淘宝式卡片）
+const CATEGORY_ORDER: BountyCategory[] = [
+  "electronics", "food", "apparel", "entertainment", "travel",
+  "learning", "fitness", "beauty", "home", "other",
+];
+const CATEGORY_ICON: Record<BountyCategory, Component> = {
+  electronics: Smartphone,
+  food: UtensilsCrossed,
+  apparel: Shirt,
+  entertainment: Gamepad2,
+  travel: Plane,
+  learning: BookOpen,
+  fitness: Dumbbell,
+  beauty: Flower2,
+  home: Sofa,
+  other: Gift,
+};
+const SKIN_ICON = Palette;
+// 从非响应式 const 取图标组件（避免把组件放进响应式 computed 触发警告）
+function categoryIcon(c: BountyCategory): Component {
+  return CATEGORY_ICON[c];
+}
+const energyNow = computed(() => store.bounties?.energyPoints ?? store.shop?.energyPoints ?? store.user?.energyPoints ?? 0);
+
+// ── 商城：可兑换的商品（未拥有的皮肤/特效 + 已定价的心愿）按类别陈列 ──
+const purchasableSkins = computed(() => {
+  const shop = store.shop;
+  if (!shop) return [];
+  return shop.catalog.filter((item) => !shop.owned.includes(item.id));
+});
+const marketBounties = computed(() =>
+  (store.bounties?.bounties ?? []).filter((b) => b.state === "saving" || b.state === "redeemable"),
+);
+const marketByCategory = computed(() =>
+  CATEGORY_ORDER.map((category) => ({
+    category,
+    label: BOUNTY_CATEGORY_LABELS[category],
+    items: marketBounties.value.filter((b) => b.category === category),
+  })).filter((g) => g.items.length > 0),
+);
+const hasMarket = computed(() => purchasableSkins.value.length > 0 || marketBounties.value.length > 0);
+
+// ── 奖励库：已获得（已拥有皮肤/特效 + 已兑现心愿）按类别陈列 ──
+const ownedSkins = computed(() => {
+  const shop = store.shop;
+  if (!shop) return [];
+  return shop.catalog
+    .filter((item) => shop.owned.includes(item.id))
+    .map((item) => ({ ...item, equipped: shop.equipped === item.id }));
+});
+const obtainedBounties = computed(() =>
+  (store.bounties?.bounties ?? []).filter((b) => b.state === "redeemed" || b.state === "fulfilled"),
+);
+const vaultByCategory = computed(() =>
+  CATEGORY_ORDER.map((category) => ({
+    category,
+    label: BOUNTY_CATEGORY_LABELS[category],
+    items: obtainedBounties.value.filter((b) => b.category === category),
+  })).filter((g) => g.items.length > 0),
+);
+const hasRewards = computed(() => obtainedBounties.value.length > 0 || ownedSkins.value.length > 0);
+const dismissedBounties = computed(() =>
+  (store.bounties?.bounties ?? []).filter((b) => b.state === "rejected" || b.state === "abandoned"),
+);
 
 const showProfileForm = ref(false);
 const profileDraft = reactive({
@@ -140,6 +305,37 @@ const taskRows = computed(() =>
   })),
 );
 
+// 执行页只显示"待办/进行中"的任务；已完成/失败归档到「已完成」视图
+const ACTIVE_TASK_STATUSES: TaskStatus[] = ["not_started", "ready", "in_progress", "paused"];
+const ARCHIVE_TASK_STATUSES: TaskStatus[] = ["completed", "reviewed", "failed"];
+const activeTaskRows = computed(() =>
+  taskRows.value.filter((r) => ACTIVE_TASK_STATUSES.includes(r.task.status)),
+);
+function archiveDateOf(task: Task): string {
+  const iso =
+    task.completedAt ?? task.statusHistory.at(-1)?.at ?? task.scheduledAt ?? new Date().toISOString();
+  const d = new Date(iso);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function taskNoteOf(task: Task): string {
+  const n = (task.evidence as Record<string, unknown> | undefined)?.note;
+  return typeof n === "string" ? n : "";
+}
+// 已完成任务按日期分组（日期倒序）
+const archiveByDate = computed(() => {
+  const groups = new Map<string, Task[]>();
+  for (const t of store.tasks) {
+    if (!ARCHIVE_TASK_STATUSES.includes(t.status)) continue;
+    const d = archiveDateOf(t);
+    const list = groups.get(d) ?? [];
+    list.push(t);
+    groups.set(d, list);
+  }
+  return [...groups.entries()]
+    .sort((a, b) => b[0].localeCompare(a[0]))
+    .map(([date, tasks]) => ({ date, tasks }));
+});
+
 const statusLabel: Record<TaskStatus, string> = {
   not_started: "未开始",
   ready: "就绪",
@@ -169,16 +365,11 @@ watch(
   { immediate: true },
 );
 
-onMounted(() => {
-  void store.refresh();
+onMounted(async () => {
+  await store.refresh();
+  // 首页趋势图：深度分析是纯本地计算（GET，不调用 LLM），进来即拉取
+  if (unlocked("deep_analysis") && !store.deepAnalysis) void store.loadDeepAnalysis();
 });
-
-async function submitMessage() {
-  const value = message.value.trim();
-  if (!value) return;
-  message.value = "";
-  await store.send(value);
-}
 
 async function runDailyReview() {
   const note = reviewNote.value.trim() || "今天先做一次快速校准。";
@@ -310,6 +501,40 @@ function attrPct(key: AttributeKey): number {
   const cap = Math.max(200, (store.user?.currentLevel ?? 1) * 80);
   return Math.min(100, Math.round((val / cap) * 100));
 }
+
+// 首页六维属性雷达图
+const attrRadar = computed(() => {
+  const n = ATTR_KEYS.length;
+  const cx = 92;
+  const cy = 90;
+  const R = 62;
+  const at = (i: number, radius: number) => {
+    const a = ((-90 + (360 / n) * i) * Math.PI) / 180;
+    return { x: cx + radius * Math.cos(a), y: cy + radius * Math.sin(a) };
+  };
+  const polygon = ATTR_KEYS.map((k, i) => {
+    const p = at(i, R * (attrPct(k) / 100));
+    return `${p.x.toFixed(1)},${p.y.toFixed(1)}`;
+  }).join(" ");
+  const rings = [0.34, 0.67, 1].map((f) =>
+    ATTR_KEYS.map((_, i) => {
+      const p = at(i, R * f);
+      return `${p.x.toFixed(1)},${p.y.toFixed(1)}`;
+    }).join(" "),
+  );
+  const axisPts = ATTR_KEYS.map((k, i) => {
+    const edge = at(i, R);
+    const label = at(i, R + 15);
+    return {
+      x: edge.x.toFixed(1),
+      y: edge.y.toFixed(1),
+      lx: label.x.toFixed(1),
+      ly: label.y.toFixed(1),
+      label: ATTRIBUTE_LABELS[k],
+    };
+  });
+  return { polygon, rings, axisPts };
+});
 
 function unlocked(feature: FeatureKey): boolean {
   return isFeatureUnlocked(feature, store.user?.currentLevel ?? 1);
@@ -642,16 +867,45 @@ const ritualPhase = ref<RitualPhase>("idle");
 const ritualLoading = ref(false);
 const ritualResult = ref("");
 const ritualResultTitle = ref("");
+const ritualResultKind = ref<"plan" | "review" | "text">("text");
+
+// ── 晨间一天一次守卫 + 系统（Windows 本地）日期（#11）──────────────
+function localDateKey(d = new Date()): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+const todayStr = ref(localDateKey());
+const todayLabel = computed(() =>
+  new Intl.DateTimeFormat("zh-CN", { month: "long", day: "numeric", weekday: "short" }).format(new Date()),
+);
+const morningPlannedDate = ref(localStorage.getItem("nexus-morning-date") ?? "");
+const morningDoneToday = computed(() => morningPlannedDate.value === todayStr.value);
+function markMorningDone() {
+  todayStr.value = localDateKey();
+  morningPlannedDate.value = todayStr.value;
+  localStorage.setItem("nexus-morning-date", todayStr.value);
+}
 
 async function startMorningRitual() {
+  // 一天一次：已规划则直接展示当天方案，不重复生成（重做功能后续开放）
+  if (morningDoneToday.value) {
+    ritualResultKind.value = store.lastPlan ? "plan" : "text";
+    ritualResultTitle.value = "今天已生成晨间规划";
+    ritualResult.value = store.lastPlan
+      ? ""
+      : "今天已完成晨间规划，可在「今日执行协议」查看今天的任务。重做功能稍后开放。";
+    ritualPhase.value = "result";
+    return;
+  }
   ritualPhase.value = "morning";
   ritualLoading.value = true;
   ritualResult.value = "";
   try {
     await store.morningPlan();
     await nextTick();
-    ritualResultTitle.value = "晨间规划协议已生成";
-    ritualResult.value = store.chat.at(-1)?.text ?? "协议已记录。";
+    markMorningDone();
+    ritualResultKind.value = store.lastPlan ? "plan" : "text";
+    ritualResultTitle.value = "今日执行协议已生成";
+    ritualResult.value = store.lastPlan ? "" : store.chat.at(-1)?.text ?? "协议已记录。";
     ritualPhase.value = "result";
   } catch {
     ritualPhase.value = "idle";
@@ -671,8 +925,9 @@ async function submitReviewRitual() {
   try {
     await store.dailyReview(note);
     reviewNote.value = "";
+    ritualResultKind.value = store.latestReview ? "review" : "text";
     ritualResultTitle.value = "日终校准协议已记录";
-    ritualResult.value = store.chat.at(-1)?.text ?? "校准已记录。";
+    ritualResult.value = store.latestReview ? "" : store.chat.at(-1)?.text ?? "校准已记录。";
     ritualPhase.value = "result";
   } catch {
     ritualPhase.value = "idle";
@@ -684,17 +939,277 @@ async function submitReviewRitual() {
 function closeRitual() {
   ritualPhase.value = "idle";
   ritualResult.value = "";
+  ritualResultKind.value = "text";
 }
+
+// ── #12 模型选择 + 重做晨间规划 ───────────────────────────────────
+type PlanOverride = { modelTier?: "haiku" | "sonnet" | "opus"; model?: string };
+const planModelOptions = computed(() => {
+  const opts: Array<{ label: string; value: string; override: PlanOverride }> = [
+    { label: "标准", value: "default", override: {} },
+    { label: "快速", value: "fast", override: { modelTier: "haiku" } },
+    { label: "深度", value: "deep", override: { modelTier: "opus" } },
+  ];
+  if (!store.offlineLlm && store.llmProvider === "deepseek") {
+    opts.push({ label: "深度推理 R1", value: "r1", override: { model: "deepseek-reasoner" } });
+  }
+  return opts;
+});
+const selectedPlanModel = ref("default");
+async function regeneratePlan() {
+  const opt =
+    planModelOptions.value.find((o) => o.value === selectedPlanModel.value) ?? planModelOptions.value[0];
+  ritualLoading.value = true;
+  try {
+    await store.regenerateMorning(opt?.override);
+    markMorningDone();
+    ritualResultKind.value = store.lastPlan ? "plan" : "text";
+    ritualResult.value = store.lastPlan ? "" : (store.chat.at(-1)?.text ?? "已重新生成。");
+  } finally {
+    ritualLoading.value = false;
+  }
+}
+
+// ── #8 数据管理抽屉：按日期查看/删除 ──────────────────────────────
+const dataDate = ref(localDateKey());
+function loadDay() {
+  store.loadDayData(dataDate.value);
+}
+watch(dataDate, loadDay);
+
+// ── #12 任务行内编辑 ──────────────────────────────────────────────
+const editingTaskId = ref<string | null>(null);
+const taskEdit = reactive({ title: "", estimatedMinutes: "", description: "", acceptanceCriteria: "" });
+function startEditTask(t: Task) {
+  editingTaskId.value = t.id;
+  taskEdit.title = t.title;
+  taskEdit.estimatedMinutes = String(t.estimatedMinutes ?? "");
+  taskEdit.description = t.description ?? "";
+  taskEdit.acceptanceCriteria = t.acceptanceCriteria ?? "";
+}
+function cancelEditTask() {
+  editingTaskId.value = null;
+}
+async function saveEditTask(id: string) {
+  await store.editTask(id, {
+    title: taskEdit.title.trim() || undefined,
+    estimatedMinutes: taskEdit.estimatedMinutes ? Number(taskEdit.estimatedMinutes) : undefined,
+    description: taskEdit.description,
+    acceptanceCriteria: taskEdit.acceptanceCriteria.trim() || undefined,
+  });
+  editingTaskId.value = null;
+}
+
+// ── #2 性格测试：短测评 → 写入 profile.traits，影响晨间规划与小人语气 ──
+const personaQuestions = [
+  {
+    key: "rhythm",
+    short: "作息",
+    prompt: "你的精力高峰在？",
+    options: [
+      { label: "早晨型", value: "morning" },
+      { label: "夜猫型", value: "night" },
+      { label: "全天平稳", value: "steady" },
+    ],
+  },
+  {
+    key: "motivation",
+    short: "动机",
+    prompt: "你更容易被什么驱动？",
+    options: [
+      { label: "目标成就", value: "achievement" },
+      { label: "好奇探索", value: "curiosity" },
+      { label: "被认可", value: "recognition" },
+      { label: "避免损失", value: "security" },
+    ],
+  },
+  {
+    key: "workStyle",
+    short: "风格",
+    prompt: "你做事的风格？",
+    options: [
+      { label: "冲刺爆发", value: "sprinter" },
+      { label: "稳定持续", value: "steady" },
+      { label: "灵活随机", value: "flexible" },
+    ],
+  },
+  {
+    key: "approach",
+    short: "方式",
+    prompt: "面对大任务你倾向？",
+    options: [
+      { label: "拆小步逐个击破", value: "incremental" },
+      { label: "一鼓作气", value: "burst" },
+      { label: "先想清再动", value: "planner" },
+    ],
+  },
+] as const;
+const personaQuiz = reactive<Record<string, string>>({
+  rhythm: "",
+  motivation: "",
+  workStyle: "",
+  approach: "",
+});
+const personaSaved = ref("");
+const personaComplete = computed(() => personaQuestions.every((q) => personaQuiz[q.key]));
+function personaLabel(key: string, value: string): string {
+  const q = personaQuestions.find((x) => x.key === key);
+  return q?.options.find((o) => o.value === value)?.label ?? value;
+}
+function seedPersona() {
+  const t = (store.profile?.traits ?? {}) as Record<string, unknown>;
+  for (const q of personaQuestions) {
+    personaQuiz[q.key] = typeof t[q.key] === "string" ? (t[q.key] as string) : "";
+  }
+  personaSaved.value = typeof t.personaSummary === "string" ? (t.personaSummary as string) : "";
+}
+async function submitPersona() {
+  const summary = personaQuestions
+    .map((q) => `${q.short}:${personaLabel(q.key, personaQuiz[q.key] ?? "")}`)
+    .join(" · ");
+  await store.updateProfile({
+    traits: {
+      ...(store.profile?.traits ?? {}),
+      rhythm: personaQuiz.rhythm,
+      motivation: personaQuiz.motivation,
+      workStyle: personaQuiz.workStyle,
+      approach: personaQuiz.approach,
+      personaSummary: summary,
+    },
+  });
+  personaSaved.value = summary;
+}
+
+// ── #10 证据图片上传 ──────────────────────────────────────────────
+const proofUploading = ref<string | null>(null);
+function isImageProof(link: string): boolean {
+  return /^\/uploads\//.test(link) || /\.(png|jpe?g|webp|gif)$/i.test(link);
+}
+async function onProofFile(e: Event, draft: EvidenceDraft) {
+  const input = e.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (!file) return;
+  proofUploading.value = file.name;
+  try {
+    const dataUrl = await new Promise<string>((res, rej) => {
+      const reader = new FileReader();
+      reader.onload = () => res(String(reader.result));
+      reader.onerror = () => rej(new Error("读取文件失败"));
+      reader.readAsDataURL(file);
+    });
+    const { url } = await api.uploadImage(dataUrl, file.name);
+    draft.proofLink = url;
+  } catch (err) {
+    store.error = err instanceof Error ? err.message : String(err);
+  } finally {
+    proofUploading.value = null;
+    input.value = "";
+  }
+}
+
+// ── 模块抽屉（左栏入口 + 右侧侧滑，一次只开一个） ──────────────────
+const MODULES = [
+  { key: "profile", label: "档案", title: "宿主档案", icon: User },
+  { key: "level", label: "等级", title: "觉醒等级 · 六维属性", icon: Zap },
+  { key: "insight", label: "洞察", title: "行为洞察报告", icon: Brain },
+  { key: "decision", label: "决策", title: "决策中枢 · 黑箱裁决 · 进化日志", icon: Scale },
+  { key: "report", label: "报告", title: "周期报告", icon: CalendarRange },
+  { key: "sense", label: "感知", title: "全域感知 · 日历 / 生命体征 / 财务 / 学习", icon: HeartPulse },
+  { key: "sim", label: "推演", title: "推演与趋势 · 关系图谱 / 深度趋势 / 路线模拟", icon: Network },
+  { key: "shop", label: "商城", title: "能量点商城", icon: Sparkles },
+  { key: "goals", label: "目标", title: "进化目标", icon: Target },
+  { key: "archive", label: "已完成", title: "已完成 · 按日期归档", icon: CalendarCheck },
+  { key: "persona", label: "性格", title: "性格测试 · 让方案更贴合你", icon: Dna },
+  { key: "data", label: "数据", title: "数据管理 · 按日期查看 / 修改 / 删除", icon: Database },
+] as const;
+
+// ── 主视图切换：总览 / 执行 / 各模块，全部整页切换（不再用抽屉）────────
+const MAIN_VIEWS = [
+  { key: "home", label: "总览", title: "态势总览 · 图形汇总", icon: LayoutDashboard },
+  { key: "workspace", label: "执行", title: "今日执行中枢 · 任务 / 小人 / 复盘 / 事件", icon: Activity },
+] as const;
+type MainView = (typeof MAIN_VIEWS)[number]["key"] | (typeof MODULES)[number]["key"];
+const VIEW_TITLES: Record<string, string> = {
+  home: "态势总览",
+  workspace: "今日执行中枢",
+  ...Object.fromEntries(MODULES.map((m) => [m.key, m.label])),
+};
+const mainView = ref<MainView>(
+  (() => {
+    const saved = localStorage.getItem("nexus-main-view");
+    return saved && saved in VIEW_TITLES ? (saved as MainView) : "home";
+  })(),
+);
+// 当前模块（home/workspace 之外即模块整页）
+const currentModule = computed(() => MODULES.find((m) => m.key === mainView.value) ?? null);
+function setMainView(v: MainView) {
+  mainView.value = v;
+  localStorage.setItem("nexus-main-view", v);
+}
+// 切到数据 / 性格模块时的副作用：载入当天数据、回填测评结果
+watch(mainView, (k) => {
+  if (k === "data") loadDay();
+  if (k === "persona") seedPersona();
+  if (k === "shop" && unlocked("shop")) {
+    void store.loadBounties();
+    void store.loadShop();
+  }
+});
+
+// 错误弹窗：4.5s 自动消失（也可手动关闭）
+let errorTimer: ReturnType<typeof setTimeout> | null = null;
+watch(
+  () => store.error,
+  (e) => {
+    if (errorTimer) {
+      clearTimeout(errorTimer);
+      errorTimer = null;
+    }
+    if (e) errorTimer = setTimeout(() => { store.error = ""; }, 4500);
+  },
+);
+
+// ── 仪表盘外壳：侧边栏折叠 + 面包屑 + 欢迎横幅数据 ────────────────────
+const sidebarCollapsed = ref(localStorage.getItem("nexus-sidebar-collapsed") === "1");
+function toggleSidebar() {
+  sidebarCollapsed.value = !sidebarCollapsed.value;
+  localStorage.setItem("nexus-sidebar-collapsed", sidebarCollapsed.value ? "1" : "0");
+}
+const currentViewLabel = computed(() => VIEW_TITLES[mainView.value] ?? "态势总览");
+const hostName = computed(() => {
+  const name = (store.profile?.basicInfo as { codename?: string } | undefined)?.codename;
+  return name && String(name).trim() ? String(name) : "宿主";
+});
+const aliveStreakCount = computed(() => streakChips.value.filter((c) => c.current > 0).length);
+const longestStreak = computed(() =>
+  streakChips.value.reduce((max, c) => Math.max(max, c.current), 0),
+);
+const overviewInsight = computed(() => {
+  if (store.netGrowth?.summary) return store.netGrowth.summary;
+  if (store.latestInsight?.coreInsight) return store.latestInsight.coreInsight;
+  if (store.report?.narrative?.headline) return store.report.narrative.headline;
+  return "数据积累中：完成晨间规划与任务、做一次净成长研判后，这里会告诉你「是否在前进」并给出建议。";
+});
 </script>
 
 <template>
-  <main class="shell">
-    <header class="topbar">
-      <section>
-        <p class="eyebrow">NEXUS-7 · 个体进化协议</p>
-        <h1>今日执行中枢</h1>
-      </section>
+  <main class="shell" :class="{ 'nav-collapsed': sidebarCollapsed }">
+    <header class="appbar">
+      <div class="crumb">
+        <span class="crumb-home">首页</span>
+        <span class="crumb-sep">/</span>
+        <span class="crumb-cur">{{ currentViewLabel }}</span>
+      </div>
       <div class="status-row">
+        <span
+          v-if="store.user"
+          class="status-pill level-pill"
+          :title="`经验 ${levelInfo.xpProgress} / ${levelInfo.xpNeeded - levelInfo.level * levelInfo.level * 100} XP → Lv.${levelInfo.level + 1}`"
+        >
+          <Zap :size="14" />
+          Lv.{{ levelInfo.level }}
+          <span class="level-pill-bar"><span class="level-pill-fill" :style="{ width: levelInfo.pct + '%' }" /></span>
+        </span>
         <span v-if="native" class="status-pill aw-on" title="NEXUS-7 原生客户端（Tauri）">
           <CircleDot :size="14" />
           原生运行
@@ -719,24 +1234,43 @@ function closeRitual() {
         <button class="icon-button" title="刷新" type="button" :disabled="store.loading" @click="store.refresh">
           <RefreshCw :size="18" />
         </button>
+        <span class="appbar-user"><User :size="14" /> {{ hostName }}</span>
       </div>
     </header>
 
-    <p v-if="store.error" class="error-line">{{ store.error }}</p>
+    <!-- 欢迎横幅（仅总览页）──────────────────────────────────────────── -->
+    <section v-if="mainView === 'home'" class="welcome-banner">
+      <div class="wb-left">
+        <h1 class="wb-title">欢迎回来，{{ hostName }} 👋</h1>
+        <p class="wb-sub">NEXUS-7 · 个体进化协议 —— 今天的行为，是更接近还是更远离理想人生？</p>
+      </div>
+      <div class="wb-kpis">
+        <div class="wb-kpi"><span class="wb-kpi-num">{{ store.goals.length }}</span><span class="wb-kpi-label">活跃目标</span></div>
+        <div class="wb-kpi"><span class="wb-kpi-num">{{ aliveStreakCount }}</span><span class="wb-kpi-label">在持习惯</span></div>
+        <div class="wb-kpi"><span class="wb-kpi-num">Lv.{{ levelInfo.level }}</span><span class="wb-kpi-label">觉醒等级</span></div>
+      </div>
+    </section>
 
-    <section class="command-band">
-      <button type="button" :disabled="store.loading" @click="startMorningRitual">
+    <section v-if="mainView === 'home'" class="command-band">
+      <button
+        type="button"
+        :class="{ 'cmd-done': morningDoneToday }"
+        :disabled="store.loading"
+        :title="morningDoneToday ? '今天已生成晨间规划，点击查看' : '生成今日执行协议'"
+        @click="startMorningRitual"
+      >
         <Sun :size="18" />
-        启动晨间仪式
+        {{ morningDoneToday ? "今日已规划 ✓" : "启动晨间仪式" }}
       </button>
       <button type="button" :disabled="store.loading" @click="startReviewRitual">
         <Moon :size="18" />
         日终校准协议
       </button>
+      <span class="command-date"><CalendarClock :size="14" /> {{ todayLabel }}</span>
     </section>
 
     <!-- ── 习惯链常驻展示（§6.6.1） ──────────────────────────────────── -->
-    <section v-if="streakChips.length > 0" class="streak-strip">
+    <section v-if="mainView === 'home' && streakChips.length > 0" class="streak-strip">
       <span
         v-for="chip in streakChips"
         :key="chip.key"
@@ -797,7 +1331,63 @@ function closeRitual() {
               <Sparkles :size="48" />
             </div>
             <h2>{{ ritualResultTitle }}</h2>
-            <p class="ritual-result-text">{{ ritualResult }}</p>
+
+            <!-- 晨间：结构化方案卡片 -->
+            <div v-if="ritualResultKind === 'plan' && store.lastPlan" class="ritual-plan">
+              <p v-if="store.lastPlan.rationale" class="ritual-plan-rationale">{{ store.lastPlan.rationale }}</p>
+              <ol class="ritual-plan-tasks">
+                <li v-for="(t, i) in store.lastPlan.tasks" :key="i" class="ritual-plan-task">
+                  <div class="ritual-plan-task-head">
+                    <span class="ritual-plan-task-title">{{ t.title }}</span>
+                    <span class="ritual-plan-task-min"><Clock :size="12" /> {{ t.estimatedMinutes }} 分钟</span>
+                  </div>
+                  <p v-if="t.description" class="ritual-plan-task-desc">{{ t.description }}</p>
+                  <div class="ritual-plan-task-meta">
+                    <span>{{ energyLabel[t.energyRequired] }}</span>
+                    <span>+{{ t.rewardPoints }} EP</span>
+                  </div>
+                </li>
+              </ol>
+              <ul v-if="store.lastPlan.risks && store.lastPlan.risks.length" class="ritual-plan-risks">
+                <li v-for="(r, i) in store.lastPlan.risks" :key="i"><Flag :size="12" /> {{ r }}</li>
+              </ul>
+            </div>
+
+            <!-- 日终：结构化复盘 -->
+            <div v-else-if="ritualResultKind === 'review' && store.latestReview" class="ritual-review">
+              <p class="ritual-review-summary">{{ reviewText(store.latestReview, 'summary') }}</p>
+              <div class="ritual-review-row">
+                <span class="ritual-review-label">真实偏差</span>
+                <p>{{ reviewText(store.latestReview, 'honestDelta') }}</p>
+              </div>
+              <div class="ritual-review-row">
+                <span class="ritual-review-label">明日调整</span>
+                <p>{{ reviewText(store.latestReview, 'tomorrowAdjustment') }}</p>
+              </div>
+              <ul v-if="reviewRisks(store.latestReview).length" class="ritual-review-risks">
+                <li v-for="r in reviewRisks(store.latestReview)" :key="r"><Flag :size="12" /> {{ r }}</li>
+              </ul>
+            </div>
+
+            <!-- 兜底纯文本 -->
+            <p v-else class="ritual-result-text">{{ ritualResult }}</p>
+
+            <!-- #12 不满意？换模型重做 -->
+            <div v-if="ritualResultKind === 'plan'" class="ritual-regen">
+              <span class="ritual-regen-label">不满意？</span>
+              <select v-model="selectedPlanModel" class="ritual-regen-select" :disabled="ritualLoading">
+                <option v-for="o in planModelOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
+              </select>
+              <button
+                type="button"
+                class="ritual-regen-btn"
+                :disabled="ritualLoading || store.loading"
+                @click="regeneratePlan"
+              >
+                <RefreshCw :size="14" /> {{ ritualLoading ? "生成中…" : "重做" }}
+              </button>
+            </div>
+
             <button type="button" class="ritual-close" @click="closeRitual">
               <Check :size="16" /> 确认
             </button>
@@ -827,6 +1417,15 @@ function closeRitual() {
       </div>
     </Teleport>
 
+    <!-- ── 模块整页：点侧栏直接整屏切换（与总览/执行同级，不再用抽屉）──── -->
+    <section v-if="currentModule" class="module-page">
+      <header class="module-page-head">
+        <component :is="currentModule.icon" :size="18" />
+        <h2>{{ currentModule.title }}</h2>
+      </header>
+      <div class="module-page-body">
+
+    <template v-if="mainView === 'profile'">
     <section class="profile-section">
       <div class="profile-header">
         <User :size="16" />
@@ -904,7 +1503,9 @@ function closeRitual() {
         </article>
       </div>
     </section>
+    </template>
 
+    <template v-else-if="mainView === 'level'">
     <!-- ── 觉醒等级 + 六维属性面板 ────────────────────────────────────── -->
     <section v-if="store.user" :class="['attr-panel', !unlocked('attributes') && 'panel-locked']">
       <div class="attr-header">
@@ -940,7 +1541,9 @@ function closeRitual() {
         <span>{{ lockMsg('attributes') }}</span>
       </div>
     </section>
+    </template>
 
+    <template v-else-if="mainView === 'insight'">
     <!-- ── 洞察报告（Lv.5 review_insights 解锁） ─────────────────────── -->
     <section :class="['insight-panel', !unlocked('review_insights') && 'panel-locked']">
       <div class="insight-header">
@@ -979,7 +1582,9 @@ function closeRitual() {
         <span>{{ lockMsg('review_insights') }}</span>
       </div>
     </section>
+    </template>
 
+    <template v-else-if="mainView === 'decision'">
     <!-- ── 决策中枢（Lv.15 behavior_score 解锁，§8/§9） ──────────────── -->
     <section :class="['decision-panel', !unlocked('behavior_score') && 'panel-locked']">
       <div class="decision-header">
@@ -1125,7 +1730,9 @@ function closeRitual() {
         点击上方任一 Agent，进化引擎会基于近期指标提议提示词改进——或在指标正常时克制地什么都不改。
       </p>
     </section>
+    </template>
 
+    <template v-else-if="mainView === 'report'">
     <!-- ── 周期报告（Lv.20 weekly_summary 解锁，§9 / P3-9 季度·年度） ─── -->
     <section :class="['report-panel', !unlocked('weekly_summary') && 'panel-locked']">
       <div class="report-header">
@@ -1204,7 +1811,9 @@ function closeRitual() {
         <span>{{ lockMsg('weekly_summary') }}</span>
       </div>
     </section>
+    </template>
 
+    <template v-else-if="mainView === 'sense'">
     <!-- ── 日历接入（§6.7 全域感知，喂晨间规划 + 复盘锚点） ──────────── -->
     <section class="health-panel">
       <div class="health-header">
@@ -1380,7 +1989,9 @@ function closeRitual() {
         刷了很多 ≠ 学到了。学习教练只认"产出"——点击右上角，让它替你分清输入和成长。
       </p>
     </section>
+    </template>
 
+    <template v-else-if="mainView === 'sim'">
     <!-- ── 关系图谱（Lv.30 path_simulation 解锁，§5.1） ──────────────── -->
     <section :class="['graph-panel', !unlocked('path_simulation') && 'panel-locked']">
       <div class="graph-header">
@@ -1508,58 +2119,163 @@ function closeRitual() {
         <span>{{ lockMsg('path_simulation') }}</span>
       </div>
     </section>
+    </template>
 
+    <template v-else-if="mainView === 'shop'">
     <!-- ── 能量点商城（Lv.3 解锁，§6.7.6 皮肤/特效） ─────────────────── -->
     <section :class="['shop-panel', !unlocked('shop') && 'panel-locked']">
       <div class="shop-header">
         <Zap :size="16" />
-        <h2>能量点商城 <span class="panel-sub">·皮肤/特效</span></h2>
-        <span class="attr-energy"><Sparkles :size="13" /> {{ store.shop?.energyPoints ?? store.user?.energyPoints ?? 0 }} EP</span>
+        <h2>能量点商城</h2>
+        <span class="attr-energy"><Sparkles :size="13" /> {{ energyNow }} EP</span>
       </div>
 
-      <div v-if="store.shop" class="shop-grid">
-        <article
-          v-for="item in store.shop.catalog"
-          :key="item.id"
-          :class="['shop-item', { owned: store.shop.owned.includes(item.id), equipped: store.shop.equipped === item.id }]"
-        >
-          <div class="shop-item-top">
-            <span class="shop-item-name">{{ item.name }}</span>
-            <span class="shop-item-kind">{{ item.kind === 'skin' ? '皮肤' : '特效' }}</span>
-          </div>
-          <p class="shop-item-desc">{{ item.description }}</p>
-          <div class="shop-item-foot">
-            <span class="shop-item-cost"><Sparkles :size="12" /> {{ item.cost }}</span>
-            <button
-              v-if="store.shop.equipped === item.id"
-              class="shop-btn equipped"
-              type="button"
-              disabled
-            >已装备</button>
-            <button
-              v-else-if="store.shop.owned.includes(item.id)"
-              class="shop-btn equip"
-              type="button"
-              :disabled="store.loading"
-              @click="store.equipSkin(item.id)"
-            >装备</button>
-            <button
-              v-else
-              class="shop-btn buy"
-              type="button"
-              :disabled="store.loading || store.shop.energyPoints < item.cost || store.shop.credibilityScore < item.minCredibility"
-              :title="store.shop.credibilityScore < item.minCredibility ? `需要可信度 ≥ ${item.minCredibility}` : (store.shop.energyPoints < item.cost ? '能量点不足' : '')"
-              @click="store.purchaseShopItem(item.id)"
-            >兑换</button>
-          </div>
-        </article>
+      <!-- 提出心愿入口：估值后直接上架商城 -->
+      <div v-if="unlocked('shop')" class="market-add">
+        <button class="market-add-btn" type="button" @click="showWishForm = !showWishForm; store.clearBountyResult()">
+          <Plus :size="14" /> {{ showWishForm ? '收起' : '提出心愿（自定义奖励）' }}
+        </button>
+        <span class="market-add-hint">说出你想要的，经济官定价后直接上架商城供你兑换。</span>
       </div>
+
+      <form v-if="showWishForm" class="wish-form" @submit.prevent="submitWish">
+        <input v-model="wishTitle" class="wish-input" type="text" maxlength="60" placeholder="想要什么？例如：一部新手机 / 周末露营 / 一杯奶茶" />
+        <input v-model="wishNote" class="wish-input" type="text" maxlength="120" placeholder="补充（可选）：理由 / 链接" />
+        <div class="wish-form-foot">
+          <input v-model="wishReference" class="wish-input wish-ref" type="number" min="0" placeholder="参考价 ¥（可选）" />
+          <button class="shop-btn buy" type="submit" :disabled="store.loading || !wishTitle.trim()">交给经济官估值</button>
+        </div>
+      </form>
+
+      <!-- 估值反馈：澄清 / 婉拒 -->
+      <div v-if="store.lastBountyResult?.verdict === 'clarify'" class="wish-feedback clarify">
+        <strong>经济官需要再确认：</strong>
+        <ul><li v-for="(q, i) in store.lastBountyResult.clarifyingQuestions" :key="i">{{ q }}</li></ul>
+        <span class="wish-feedback-sub">在上面补充后再提交一次。</span>
+      </div>
+      <div v-else-if="store.lastBountyResult?.verdict === 'reject'" class="wish-feedback reject">
+        <strong>经济官婉拒了：</strong>{{ store.lastBountyResult.rejectReason || store.lastBountyResult.companionLine }}
+      </div>
+
+      <!-- ── 商城：可兑换商品，分类陈列（京东淘宝式商品网格）─────────── -->
+      <div v-if="hasMarket" class="market">
+        <!-- 皮肤特效（未拥有）-->
+        <section v-if="purchasableSkins.length > 0" class="cat-section">
+          <header class="cat-header"><span class="cat-icon"><Palette :size="14" /></span><h4>皮肤特效</h4><span class="cat-count">{{ purchasableSkins.length }}</span></header>
+          <div class="product-grid">
+            <article v-for="item in purchasableSkins" :key="item.id" class="product-card">
+              <div class="product-thumb"><Palette :size="26" /></div>
+              <div class="product-name">{{ item.name }}</div>
+              <p class="product-desc">{{ item.description }}</p>
+              <div class="product-foot">
+                <span class="product-price"><Sparkles :size="12" /> {{ item.cost }} <span class="price-unit">EP</span></span>
+                <button
+                  class="shop-btn buy"
+                  type="button"
+                  :disabled="store.loading || (store.shop?.energyPoints ?? 0) < item.cost || (store.shop?.credibilityScore ?? 0) < item.minCredibility"
+                  :title="(store.shop?.credibilityScore ?? 0) < item.minCredibility ? `需要可信度 ≥ ${item.minCredibility}` : ((store.shop?.energyPoints ?? 0) < item.cost ? '能量点不足' : '')"
+                  @click="store.purchaseShopItem(item.id)"
+                >兑换</button>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <!-- 自定义奖励，按类别 -->
+        <section v-for="group in marketByCategory" :key="group.category" class="cat-section">
+          <header class="cat-header"><span class="cat-icon"><component :is="categoryIcon(group.category)" :size="14" /></span><h4>{{ group.label }}</h4><span class="cat-count">{{ group.items.length }}</span></header>
+          <div class="product-grid">
+            <article v-for="b in group.items" :key="b.id" :class="['product-card', { ready: bountyProgress(b.price) >= 1 }]">
+              <button class="product-remove" type="button" title="放弃这个心愿" :disabled="store.loading" @click="store.abandonBounty(b.id)"><X :size="12" /></button>
+              <div class="product-thumb"><component :is="categoryIcon(group.category)" :size="26" /></div>
+              <div class="product-name">{{ b.title }}</div>
+              <div v-if="recentlyRepriced(b)" :class="['reprice-badge', { down: (b.priceBreakdown.repriceFrom ?? 0) > b.price }]">
+                <ArrowUpDown :size="11" /> 已按新节奏调价 {{ b.priceBreakdown.repriceFrom }}→{{ b.price }}
+              </div>
+              <p class="product-line">{{ b.companionLine }}</p>
+              <div class="product-progress" :title="b.priceBreakdown.keyFactors.join(' · ')">
+                <div class="product-progress-fill" :style="{ width: `${Math.round(bountyProgress(b.price) * 100)}%` }"></div>
+              </div>
+              <div class="product-need">
+                <span v-if="bountyProgress(b.price) >= 1" class="need-ok">已可兑换</span>
+                <span v-else>还差 {{ b.price - energyNow }} EP</span>
+              </div>
+              <div class="product-foot">
+                <span class="product-price"><Sparkles :size="12" /> {{ b.price }} <span class="price-unit">EP</span></span>
+                <button
+                  class="shop-btn buy"
+                  type="button"
+                  :disabled="store.loading || bountyProgress(b.price) < 1"
+                  :title="bountyProgress(b.price) < 1 ? `还差 ${b.price - energyNow} 能量点` : ''"
+                  @click="store.redeemBounty(b.id)"
+                >兑换</button>
+              </div>
+            </article>
+          </div>
+        </section>
+      </div>
+      <p v-else-if="unlocked('shop') && !showWishForm" class="market-empty">商城空空如也。提出一个你真正想要的奖励，让它上架。</p>
+
+      <!-- ── 奖励库：兑换成功的商品，分类陈列 ─────────────────────────── -->
+      <div v-if="hasRewards" class="vault">
+        <div class="vault-title"><Gift :size="15" /><h3>奖励库 <span class="panel-sub">·已兑换到手，按类别陈列</span></h3></div>
+
+        <!-- 皮肤特效（已拥有）-->
+        <section v-if="ownedSkins.length > 0" class="cat-section">
+          <header class="cat-header"><span class="cat-icon"><Palette :size="14" /></span><h4>皮肤特效</h4><span class="cat-count">{{ ownedSkins.length }}</span></header>
+          <div class="product-grid">
+            <article v-for="s in ownedSkins" :key="s.id" :class="['product-card', 'owned', { equipped: s.equipped }]">
+              <div class="product-thumb"><Palette :size="26" /></div>
+              <div class="product-name">{{ s.name }}</div>
+              <div class="product-foot">
+                <span class="product-tag">{{ s.kind === 'skin' ? '皮肤' : '特效' }}</span>
+                <button v-if="s.equipped" class="shop-btn equipped" type="button" disabled>已装备</button>
+                <button v-else class="shop-btn equip" type="button" :disabled="store.loading" @click="store.equipSkin(s.id)">装备</button>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <!-- 已兑换的自定义奖励，按类别 -->
+        <section v-for="group in vaultByCategory" :key="group.category" class="cat-section">
+          <header class="cat-header"><span class="cat-icon"><component :is="categoryIcon(group.category)" :size="14" /></span><h4>{{ group.label }}</h4><span class="cat-count">{{ group.items.length }}</span></header>
+          <div class="product-grid">
+            <article v-for="b in group.items" :key="b.id" class="product-card owned">
+              <div class="product-thumb"><component :is="categoryIcon(group.category)" :size="26" /></div>
+              <div class="product-name">{{ b.title }}</div>
+              <div class="product-foot">
+                <span class="product-price"><Sparkles :size="12" /> {{ b.price }} <span class="price-unit">EP</span></span>
+                <button
+                  v-if="b.state === 'redeemed'"
+                  class="shop-btn equip"
+                  type="button"
+                  :disabled="store.loading"
+                  title="确认已在现实中拿到"
+                  @click="store.fulfillBounty(b.id)"
+                >已到手</button>
+                <span v-else class="product-tag done">{{ BOUNTY_STATE_LABELS[b.state] }}</span>
+              </div>
+            </article>
+          </div>
+        </section>
+      </div>
+
+      <!-- 已放弃 / 被婉拒（非奖励，折叠收纳）-->
+      <details v-if="dismissedBounties.length > 0" class="wish-archive">
+        <summary>已放弃 / 已婉拒（{{ dismissedBounties.length }}）</summary>
+        <div v-for="b in dismissedBounties" :key="b.id" class="wish-archive-row">
+          <span class="wish-archive-title">{{ b.title }}</span>
+          <span :class="['wish-state', b.state]">{{ BOUNTY_STATE_LABELS[b.state] }}</span>
+        </div>
+      </details>
 
       <div v-if="!unlocked('shop')" class="lock-overlay">
         <span>{{ lockMsg('shop') }}</span>
       </div>
     </section>
+    </template>
 
+    <template v-else-if="mainView === 'goals'">
     <section class="goals-section">
       <div class="goals-header">
         <Target :size="16" />
@@ -1607,36 +2323,372 @@ function closeRitual() {
         <span v-if="store.goals.length === 0" class="empty">设定进化目标后，晨间仪式将生成定向执行协议。</span>
       </div>
     </section>
+    </template>
 
-    <section class="workspace-grid">
+    <!-- ── 已完成：按日期归档 ──────────────────────────────────────── -->
+    <template v-else-if="mainView === 'archive'">
+    <section class="archive-panel">
+      <div class="panel-heading">
+        <CalendarCheck :size="18" />
+        <h2>已完成 <span class="panel-sub">·按日期归档</span></h2>
+      </div>
+      <p v-if="archiveByDate.length === 0" class="empty">还没有已完成的任务。完成或失败的任务会按日期归档到这里。</p>
+      <div v-for="g in archiveByDate" :key="g.date" class="archive-day">
+        <div class="archive-day-head">
+          <span class="archive-date">{{ g.date }}</span>
+          <span class="archive-count">{{ g.tasks.length }} 项</span>
+        </div>
+        <div class="archive-list">
+          <article v-for="t in g.tasks" :key="t.id" :class="['archive-card', t.status]">
+            <div class="archive-card-top">
+              <span class="archive-title">{{ t.title }}</span>
+              <span :class="['status-badge', t.status]">{{ statusLabel[t.status] }}</span>
+            </div>
+            <div class="archive-meta">
+              <span v-if="t.actualMinutes"><Clock :size="13" /> {{ t.actualMinutes }} 分钟</span>
+              <span><Sparkles :size="13" /> +{{ t.rewardPoints }}</span>
+            </div>
+            <p v-if="taskNoteOf(t)" class="archive-note">{{ taskNoteOf(t) }}</p>
+          </article>
+        </div>
+      </div>
+    </section>
+    </template>
+
+    <!-- ── 性格测试（#2）：短测评 → 写入档案，影响方案与语气 ────────── -->
+    <template v-else-if="mainView === 'persona'">
+    <section class="persona-panel">
+      <p class="persona-intro">花 1 分钟做个小测评。系统会据此调整晨间规划的节奏、粒度与小人语气——不同的人，方案不该长一个样。</p>
+      <div v-for="q in personaQuestions" :key="q.key" class="persona-q">
+        <h3 class="persona-q-prompt">{{ q.prompt }}</h3>
+        <div class="persona-options">
+          <button
+            v-for="o in q.options"
+            :key="o.value"
+            type="button"
+            :class="['persona-option', { active: personaQuiz[q.key] === o.value }]"
+            @click="personaQuiz[q.key] = o.value"
+          >
+            {{ o.label }}
+          </button>
+        </div>
+      </div>
+      <button class="persona-submit" type="button" :disabled="!personaComplete || store.loading" @click="submitPersona">
+        <Check :size="14" /> 保存画像
+      </button>
+      <p v-if="personaSaved" class="persona-saved"><Sparkles :size="13" /> 当前画像：{{ personaSaved }}</p>
+    </section>
+    </template>
+
+    <!-- ── 数据管理（#8）：按日期查看 / 删除 ─────────────────────────── -->
+    <template v-else-if="mainView === 'data'">
+    <section class="data-panel">
+      <div class="data-toolbar">
+        <label class="data-date-label">
+          <CalendarClock :size="14" />
+          <input v-model="dataDate" type="date" class="data-date" />
+        </label>
+        <button class="steward-btn" type="button" :disabled="store.loading" @click="loadDay">
+          <RefreshCw :size="13" /> 刷新
+        </button>
+      </div>
+
+      <div class="data-group">
+        <h3 class="data-group-title">任务 <span>{{ store.dayData?.tasks.length ?? 0 }}</span></h3>
+        <p v-if="!store.dayData?.tasks.length" class="empty">这一天没有任务。</p>
+        <div v-for="t in store.dayData?.tasks ?? []" :key="t.id" class="data-row">
+          <div class="data-row-main">
+            <span class="data-row-title">{{ t.title }}</span>
+            <span class="data-row-sub">{{ statusLabel[t.status] }} · {{ t.estimatedMinutes ?? '?' }} 分钟 · {{ t.source }}</span>
+          </div>
+          <button class="data-del" type="button" title="删除任务" :disabled="store.loading" @click="store.removeTask(t.id)">
+            <Trash2 :size="14" />
+          </button>
+        </div>
+      </div>
+
+      <div class="data-group">
+        <h3 class="data-group-title">复盘 <span>{{ store.dayData?.reviews.length ?? 0 }}</span></h3>
+        <p v-if="!store.dayData?.reviews.length" class="empty">这一天没有复盘。</p>
+        <div v-for="r in store.dayData?.reviews ?? []" :key="r.id" class="data-row">
+          <div class="data-row-main">
+            <span class="data-row-title">{{ r.type }} 复盘</span>
+            <span class="data-row-sub">{{ formatTime(r.createdAt) }}</span>
+          </div>
+          <button class="data-del" type="button" title="删除复盘" :disabled="store.loading" @click="store.removeReview(r.id)">
+            <Trash2 :size="14" />
+          </button>
+        </div>
+      </div>
+
+      <div class="data-group">
+        <h3 class="data-group-title">事件 <span>{{ store.dayData?.events.length ?? 0 }}</span></h3>
+        <p v-if="!store.dayData?.events.length" class="empty">这一天没有事件。</p>
+        <div v-for="e in store.dayData?.events ?? []" :key="e.id" class="data-row">
+          <div class="data-row-main">
+            <span class="data-row-title">{{ e.category ?? e.type }}</span>
+            <span class="data-row-sub">{{ e.source }} · {{ formatTime(e.occurredAt) }}</span>
+          </div>
+          <button class="data-del" type="button" title="删除事件" :disabled="store.loading" @click="store.removeEvent(e.id)">
+            <Trash2 :size="14" />
+          </button>
+        </div>
+      </div>
+    </section>
+    </template>
+
+      </div>
+    </section>
+
+    <!-- ── 主体：左侧侧边栏 + 内容区 ──────────────────────────────────── -->
+    <div class="app-body">
+      <nav class="module-rail">
+        <div class="brand">
+          <span class="brand-mark"><Bot :size="18" /></span>
+          <span class="brand-name">NEXUS-7</span>
+        </div>
+        <div class="rail-scroll">
+          <button
+            v-for="v in MAIN_VIEWS"
+            :key="v.key"
+            type="button"
+            :class="['rail-item', 'rail-view', { active: mainView === v.key }]"
+            :title="v.title"
+            @click="setMainView(v.key)"
+          >
+            <component :is="v.icon" :size="20" />
+            <span>{{ v.label }}</span>
+          </button>
+          <div class="rail-divider"></div>
+          <button
+            v-for="m in MODULES"
+            :key="m.key"
+            type="button"
+            :class="['rail-item', { active: mainView === m.key }]"
+            :title="m.title"
+            @click="setMainView(m.key)"
+          >
+            <component :is="m.icon" :size="20" />
+            <span>{{ m.label }}</span>
+          </button>
+        </div>
+        <button
+          class="rail-collapse"
+          type="button"
+          :title="sidebarCollapsed ? '展开侧栏' : '收起侧栏'"
+          @click="toggleSidebar"
+        >
+          <component :is="sidebarCollapsed ? ChevronRight : ChevronLeft" :size="18" />
+          <span>收起</span>
+        </button>
+      </nav>
+
+      <div class="app-main">
+        <!-- ── 首页态势总览：一进来就用图表回答「我是否在前进」 ──────────── -->
+        <section v-if="mainView === 'home'" class="overview">
+          <!-- KPI 卡片行 -->
+          <div class="ov-kpis">
+            <article class="kpi-card">
+              <div class="kpi-top"><span class="kpi-label">今日完成</span><span class="kpi-ico ok"><FileText :size="16" /></span></div>
+              <strong class="kpi-num">{{ store.completedToday }}</strong>
+              <span class="kpi-sub">待推进 {{ store.activeTasks.length }}</span>
+            </article>
+            <article class="kpi-card">
+              <div class="kpi-top"><span class="kpi-label">净成长 · 是否在前进</span><span class="kpi-ico hi"><Scale :size="16" /></span></div>
+              <strong class="kpi-num" :style="store.netGrowth ? { color: netGrowthColor } : {}">
+                {{ store.netGrowth ? (store.netGrowth.netValue >= 0 ? '+' : '') + store.netGrowth.netValue : '—' }}
+              </strong>
+              <span class="kpi-sub" :style="store.netGrowth ? { color: netGrowthColor } : {}">
+                {{ store.netGrowth ? NET_GROWTH_VERDICT_LABELS[store.netGrowth.verdict] : (unlocked('behavior_score') ? '点右下角研判' : lockMsg('behavior_score')) }}
+              </span>
+            </article>
+            <article class="kpi-card">
+              <div class="kpi-top"><span class="kpi-label">最长连续</span><span class="kpi-ico hi"><Flame :size="16" /></span></div>
+              <strong class="kpi-num">{{ longestStreak }} <span class="kpi-unit">天</span></strong>
+              <span class="kpi-sub">在持习惯 {{ aliveStreakCount }} 条</span>
+            </article>
+            <article class="kpi-card">
+              <div class="kpi-top"><span class="kpi-label">觉醒等级</span><span class="kpi-ico"><Sparkles :size="16" /></span></div>
+              <strong class="kpi-num">Lv.{{ levelInfo.level }}</strong>
+              <div class="kpi-bar"><div class="kpi-bar-fill" :style="{ width: levelInfo.pct + '%' }" /></div>
+            </article>
+          </div>
+
+          <!-- 图表行：六维雷达 + 跨周趋势 -->
+          <div class="ov-charts">
+            <article class="ov-card">
+              <div class="ov-card-head">
+                <Zap :size="15" />
+                <h3>知识/能力掌握雷达 <span class="panel-sub">·六维</span></h3>
+                <span class="ov-tag">全维快照</span>
+              </div>
+              <template v-if="unlocked('attributes') && store.user">
+                <svg viewBox="0 0 184 180" class="ov-radar">
+                  <polygon v-for="(r, i) in attrRadar.rings" :key="`ring-${i}`" :points="r" class="ov-radar-ring" />
+                  <line
+                    v-for="(a, i) in attrRadar.axisPts"
+                    :key="`axis-${i}`"
+                    x1="92"
+                    y1="90"
+                    :x2="a.x"
+                    :y2="a.y"
+                    class="ov-radar-axis"
+                  />
+                  <polygon :points="attrRadar.polygon" class="ov-radar-area" />
+                  <text
+                    v-for="(a, i) in attrRadar.axisPts"
+                    :key="`lbl-${i}`"
+                    :x="a.lx"
+                    :y="a.ly"
+                    text-anchor="middle"
+                    class="ov-radar-label"
+                  >{{ a.label }}</text>
+                </svg>
+              </template>
+              <p v-else class="empty">{{ lockMsg('attributes') }}</p>
+            </article>
+
+            <article class="ov-card">
+              <div class="ov-card-head">
+                <LineChart :size="15" />
+                <h3>跨周趋势 <span class="panel-sub">·近 {{ store.deepAnalysis?.weeks ?? 12 }} 周</span></h3>
+                <button
+                  v-if="unlocked('deep_analysis')"
+                  class="ov-mini-btn"
+                  type="button"
+                  title="刷新趋势"
+                  :disabled="store.loading"
+                  @click="store.loadDeepAnalysis()"
+                >
+                  <RefreshCw :size="12" />
+                </button>
+              </div>
+              <p v-if="!unlocked('deep_analysis')" class="empty">{{ lockMsg('deep_analysis') }}</p>
+              <template v-else-if="store.deepAnalysis">
+                <div class="ov-trend-grid">
+                  <div class="ov-trend">
+                    <span class="ov-trend-label">净成长</span>
+                    <svg viewBox="0 0 220 30" preserveAspectRatio="none" class="ov-spark">
+                      <polyline :points="sparkline(store.deepAnalysis.netGrowthTrend, 220, 30)" class="spark-line net" />
+                    </svg>
+                  </div>
+                  <div class="ov-trend">
+                    <span class="ov-trend-label">任务完成</span>
+                    <svg viewBox="0 0 220 30" preserveAspectRatio="none" class="ov-spark">
+                      <polyline :points="sparkline(store.deepAnalysis.taskTrend, 220, 30)" class="spark-line task" />
+                    </svg>
+                  </div>
+                  <div v-if="store.deepAnalysis.healthTrend.length" class="ov-trend">
+                    <span class="ov-trend-label">日均步数</span>
+                    <svg viewBox="0 0 220 30" preserveAspectRatio="none" class="ov-spark">
+                      <polyline :points="sparkline(store.deepAnalysis.healthTrend, 220, 30)" class="spark-line health" />
+                    </svg>
+                  </div>
+                  <div v-if="store.deepAnalysis.financeTrend.length" class="ov-trend">
+                    <span class="ov-trend-label">每周支出</span>
+                    <svg viewBox="0 0 220 30" preserveAspectRatio="none" class="ov-spark">
+                      <polyline :points="sparkline(store.deepAnalysis.financeTrend, 220, 30)" class="spark-line finance" />
+                    </svg>
+                  </div>
+                </div>
+              </template>
+              <p v-else class="empty">正在计算跨周趋势…点右上角可手动刷新。</p>
+            </article>
+          </div>
+
+          <!-- Agent 建议条 -->
+          <article class="ov-card ov-agent">
+            <div class="ov-card-head">
+              <Brain :size="15" />
+              <h3>学情侦探 · 进展研判</h3>
+              <span class="ov-agent-tag">Insight Agent</span>
+              <button
+                v-if="unlocked('behavior_score')"
+                class="ov-mini-btn"
+                type="button"
+                title="重新研判今日净成长"
+                :disabled="store.loading"
+                @click="store.runNetGrowth()"
+              >
+                <RefreshCw :size="12" />
+              </button>
+            </div>
+            <p class="ov-agent-text">{{ overviewInsight }}</p>
+            <div
+              v-if="store.netGrowth && (store.netGrowth.positives.length || store.netGrowth.negatives.length)"
+              class="netgrowth-factors"
+            >
+              <span v-for="p in store.netGrowth.positives" :key="`p-${p.label}`" class="factor pos">+{{ p.weight }} {{ p.label }}</span>
+              <span v-for="n in store.netGrowth.negatives" :key="`n-${n.label}`" class="factor neg">−{{ n.weight }} {{ n.label }}</span>
+            </div>
+          </article>
+        </section>
+
+        <section v-if="mainView === 'workspace'" class="workspace-grid">
       <section class="panel task-panel">
         <div class="panel-heading">
           <Activity :size="18" />
           <h2>今日执行协议 <span class="panel-sub">·行动矩阵</span></h2>
         </div>
         <div class="task-list">
-          <article v-for="row in taskRows" :key="row.task.id" class="task-row">
+          <article v-for="row in activeTaskRows" :key="row.task.id" class="task-row">
             <div class="task-main">
-              <div class="task-title-row">
-                <h3>{{ row.task.title }}</h3>
-                <span :class="['status-badge', row.task.status]">{{ statusLabel[row.task.status] }}</span>
-              </div>
-              <p>{{ row.task.description || row.task.acceptanceCriteria }}</p>
-              <div class="task-meta">
-                <span><Zap :size="14" />{{ energyLabel[row.task.energyRequired] }}</span>
-                <span><Clock :size="14" />{{ row.task.estimatedMinutes ?? "?" }} 分钟</span>
-                <span><Sparkles :size="14" />+{{ row.task.rewardPoints }}</span>
-              </div>
-              <dl class="task-proof">
-                <div>
-                  <dt>验收</dt>
-                  <dd>{{ row.task.acceptanceCriteria }}</dd>
+              <!-- #12 行内编辑 -->
+              <div v-if="editingTaskId === row.task.id" class="task-edit">
+                <input v-model="taskEdit.title" class="task-edit-input" placeholder="任务标题" />
+                <input v-model="taskEdit.estimatedMinutes" inputmode="numeric" class="task-edit-input" placeholder="预计分钟" />
+                <textarea v-model="taskEdit.description" class="task-edit-area" rows="2" placeholder="描述" />
+                <textarea v-model="taskEdit.acceptanceCriteria" class="task-edit-area" rows="2" placeholder="验收标准" />
+                <div class="task-edit-actions">
+                  <button type="button" class="task-edit-save" :disabled="store.loading" @click="saveEditTask(row.task.id)">
+                    <Check :size="14" /> 保存
+                  </button>
+                  <button type="button" class="task-edit-cancel" @click="cancelEditTask">
+                    <X :size="14" /> 取消
+                  </button>
                 </div>
-                <div>
-                  <dt>证明</dt>
-                  <dd>{{ row.task.proofMethod }}</dd>
+              </div>
+
+              <template v-else>
+                <div class="task-title-row">
+                  <h3>{{ row.task.title }}</h3>
+                  <div class="task-title-tools">
+                    <span :class="['status-badge', row.task.status]">{{ statusLabel[row.task.status] }}</span>
+                    <button class="task-tool" type="button" title="编辑任务" @click="startEditTask(row.task)">
+                      <Edit3 :size="14" />
+                    </button>
+                    <button class="task-tool danger" type="button" title="删除任务" :disabled="store.loading" @click="store.removeTask(row.task.id)">
+                      <Trash2 :size="14" />
+                    </button>
+                  </div>
                 </div>
-              </dl>
+                <p>{{ row.task.description || row.task.acceptanceCriteria }}</p>
+                <div class="task-meta">
+                  <span><Zap :size="14" />{{ energyLabel[row.task.energyRequired] }}</span>
+                  <span><Clock :size="14" />{{ row.task.estimatedMinutes ?? "?" }} 分钟</span>
+                  <span><Sparkles :size="14" />+{{ row.task.rewardPoints }}</span>
+                </div>
+                <!-- 进行中：实时已进行 / 剩余 -->
+                <div v-if="row.task.status === 'in_progress' && row.task.startedAt" class="task-running">
+                  <span class="task-running-elapsed"><Clock :size="13" /> 已进行 {{ fmtDuration(taskElapsedSec(row.task)) }}</span>
+                  <template v-if="row.task.estimatedMinutes">
+                    <div class="task-running-bar">
+                      <div class="task-running-fill" :class="{ over: taskOvertime(row.task) }" :style="{ width: `${Math.round(taskRunProgress(row.task) * 100)}%` }"></div>
+                    </div>
+                    <span class="task-running-remain" :class="{ over: taskOvertime(row.task) }">{{ taskRemainLabel(row.task) }}</span>
+                  </template>
+                </div>
+                <dl class="task-proof">
+                  <div>
+                    <dt>验收</dt>
+                    <dd>{{ row.task.acceptanceCriteria }}</dd>
+                  </div>
+                  <div>
+                    <dt>证明</dt>
+                    <dd>{{ row.task.proofMethod }}</dd>
+                  </div>
+                </dl>
+              </template>
             </div>
 
             <div class="evidence-box">
@@ -1648,12 +2700,38 @@ function closeRitual() {
                 </label>
                 <label>
                   <LinkIcon :size="14" />
-                  <input v-model="row.draft.proofLink" placeholder="证明链接" />
+                  <input v-model="row.draft.proofLink" placeholder="证明链接 / 上传图片" />
                 </label>
+              </div>
+              <div class="evidence-proof">
+                <label class="evidence-upload" :title="proofUploading ? '上传中…' : '上传截图作为证据'">
+                  <ImageIcon :size="14" />
+                  <span>{{ proofUploading ? "上传中…" : "上传图片" }}</span>
+                  <input type="file" accept="image/*" hidden @change="onProofFile($event, row.draft)" />
+                </label>
+                <a
+                  v-if="row.draft.proofLink && isImageProof(row.draft.proofLink)"
+                  class="evidence-thumb"
+                  :href="assetUrl(row.draft.proofLink)"
+                  target="_blank"
+                  rel="noopener"
+                  title="点击查看大图"
+                >
+                  <img :src="assetUrl(row.draft.proofLink)" alt="证据图片" />
+                </a>
               </div>
             </div>
 
             <div class="task-actions">
+              <button
+                class="task-focus-btn"
+                title="专注（深度协议 · 番茄钟）"
+                type="button"
+                :disabled="row.task.status === 'completed' || (focusTimer.active.value && focusTimer.taskId.value === row.task.id)"
+                @click="startFocus(row.task)"
+              >
+                <Timer :size="16" />
+              </button>
               <button
                 title="开始"
                 type="button"
@@ -1688,7 +2766,9 @@ function closeRitual() {
               </button>
             </div>
           </article>
-          <p v-if="store.tasks.length === 0" class="empty">启动晨间仪式后，系统将生成今日执行协议。</p>
+          <p v-if="activeTaskRows.length === 0" class="empty">
+            {{ store.tasks.length === 0 ? '启动晨间仪式后，系统将生成今日执行协议。' : '没有待办任务了——已完成的在「已完成」里按日期归档。' }}
+          </p>
         </div>
       </section>
 
@@ -1710,6 +2790,11 @@ function closeRitual() {
         <p class="companion-dialogue">
           {{ store.companion?.currentDialogue ?? "NEXUS-7 神经链路已建立。等待宿主指令。" }}
         </p>
+        <div v-if="store.user" class="companion-level" :title="`等级 Lv.${levelInfo.level}`">
+          <span class="companion-level-tag"><Zap :size="13" /> Lv.{{ levelInfo.level }}</span>
+          <div class="companion-level-track"><div class="companion-level-fill" :style="{ width: levelInfo.pct + '%' }" /></div>
+          <span class="companion-level-xp">{{ levelInfo.xpProgress }}/{{ levelInfo.xpNeeded - levelInfo.level * levelInfo.level * 100 }} XP</span>
+        </div>
         <div class="metrics">
           <div>
             <strong>{{ store.completedToday }}</strong>
@@ -1786,34 +2871,46 @@ function closeRitual() {
           <p v-if="store.events.length === 0" class="empty">神经脉冲流尚未激活。开始使用后实时记录。</p>
         </div>
       </section>
-
-      <section class="panel chat-panel">
-        <div class="panel-heading">
-          <MessageSquare :size="18" />
-          <h2>神经链接 <span class="panel-sub">·实时通信</span></h2>
-        </div>
-        <div class="chat-log">
-          <p v-if="store.chat.length === 0" class="empty">神经链接已建立，等待宿主输入第一条指令。</p>
-          <article v-for="line in store.chat" :key="`${line.at}-${line.text}`" :class="['chat-line', line.role]">
-            <span>{{ line.role === "host" ? "宿主" : "NEXUS" }}</span>
-            <p>{{ line.text }}</p>
-          </article>
-        </div>
-        <form class="composer" @submit.prevent="submitMessage">
-          <input v-model="message" placeholder="向系统核心发送指令或陈述行为..." />
-          <button class="icon-button primary" title="发送" type="submit" :disabled="store.loading">
-            <Send :size="18" />
-          </button>
-        </form>
-      </section>
-    </section>
+        </section>
+      </div>
+    </div>
 
     <!-- 桌面悬浮小人（可拖动，任务完成弹出） -->
     <FloatingCompanion />
+    <FocusTimer />
+
+    <!-- 神经链接：可拖动浮动小窗（不固定在栅格里） -->
+    <ChatWindow />
 
     <!-- 首次启动觉醒仪式（§7.2，未 onboarded 时全屏覆盖） -->
     <Teleport to="body">
       <OnboardingRitual v-if="showOnboarding" @done="ritualDismissed = true" />
+    </Teleport>
+
+    <!-- 新手指引（觉醒之后、首次进入主界面） -->
+    <Teleport to="body">
+      <GuideTour v-if="showGuide" @done="guideSeen = true" />
+    </Teleport>
+
+    <!-- 全局活动反馈：顶部进度条 + 处理中提示（任何按钮触发的异步都有反馈）-->
+    <Teleport to="body">
+      <div v-if="isBusy" class="global-progress"><span class="global-progress-bar" /></div>
+    </Teleport>
+    <Teleport to="body">
+      <transition name="busy-toast">
+        <div v-if="isBusy" class="busy-toast"><span class="busy-dot" /> 处理中…</div>
+      </transition>
+    </Teleport>
+
+    <!-- 全局错误弹窗：顶部居中浮层，可关闭，4.5s 自动消失 -->
+    <Teleport to="body">
+      <transition name="toast-pop">
+        <div v-if="store.error" class="app-toast error" role="alert">
+          <AlertTriangle :size="15" />
+          <span class="app-toast-msg">{{ store.error }}</span>
+          <button class="app-toast-close" type="button" title="关闭" @click="store.error = ''"><X :size="14" /></button>
+        </div>
+      </transition>
     </Teleport>
   </main>
 </template>

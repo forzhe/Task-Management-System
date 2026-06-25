@@ -18,11 +18,13 @@ export class PlanningAgent {
   ) {}
 
   async run(context: AgentContext): Promise<AgentResult> {
-    const modelTier = this.router.route({ agentId: "planning", trigger: context.trigger });
+    const modelTier =
+      context.modelTierOverride ?? this.router.route({ agentId: "planning", trigger: context.trigger });
     const prompt = getAgentPrompt("planning");
     const response = await this.llm.complete({
       agentId: "planning",
       modelTier,
+      model: context.modelOverride,
       messages: [
         {
           role: "system",

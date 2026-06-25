@@ -1,10 +1,12 @@
-import { Body, Controller, Get, Inject, Param, Patch, Post, Query } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Inject, Param, Patch, Post, Query } from "@nestjs/common";
 import type {
   Goal,
   GoalStatusUpdateInput,
+  ModelTier,
   ProfileUpdateInput,
   ReviewType,
   Task,
+  TaskEditInput,
   TaskStatus,
   TaskStatusUpdateInput,
   TriggerKind,
@@ -26,8 +28,12 @@ export class AppController {
   }
 
   @Post("chat/send")
-  sendChat(@Body() body: { message: string; trigger?: TriggerKind }) {
-    return this.nexus.handleChat(body.message, body.trigger ?? "user_message");
+  sendChat(
+    @Body() body: { message: string; trigger?: TriggerKind; modelTier?: ModelTier; model?: string },
+  ) {
+    const override =
+      body.modelTier || body.model ? { modelTier: body.modelTier, model: body.model } : undefined;
+    return this.nexus.handleChat(body.message, body.trigger ?? "user_message", override);
   }
 
   @Get("profile")
@@ -68,6 +74,41 @@ export class AppController {
   @Patch("tasks/:id/status")
   updateTaskStatus(@Param("id") id: string, @Body() body: TaskStatusUpdateInput) {
     return this.nexus.updateTaskStatus(id, body.status, body.evidence);
+  }
+
+  @Patch("tasks/:id")
+  editTask(@Param("id") id: string, @Body() body: TaskEditInput) {
+    return this.nexus.updateTask(id, body);
+  }
+
+  @Post("tasks/:id/focus-session")
+  recordFocusSession(@Param("id") id: string, @Body() body: { minutes: number }) {
+    return this.nexus.recordFocusSession(id, body.minutes ?? 0);
+  }
+
+  @Delete("tasks/:id")
+  deleteTask(@Param("id") id: string) {
+    return this.nexus.deleteTask(id);
+  }
+
+  @Delete("events/:id")
+  deleteEvent(@Param("id") id: string) {
+    return this.nexus.deleteEvent(id);
+  }
+
+  @Delete("reviews/:id")
+  deleteReview(@Param("id") id: string) {
+    return this.nexus.deleteReview(id);
+  }
+
+  @Get("data/day")
+  getDayData(@Query("date") date: string) {
+    return this.nexus.getDayData(date ?? new Date().toISOString().slice(0, 10));
+  }
+
+  @Post("uploads")
+  uploadImage(@Body() body: { dataUrl: string; filename?: string }) {
+    return this.nexus.saveUpload(body.dataUrl, body.filename);
   }
 
   @Post("reviews/daily")
@@ -312,6 +353,37 @@ export class AppController {
   @Post("shop/equip")
   equipSkin(@Body() body: { skinId: string }) {
     return this.nexus.equipSkin(body.skinId);
+  }
+
+  // ── 自定义悬赏与 AI 定价（商城子系统）──────────────────────────────
+
+  @Get("bounties")
+  getBounties() {
+    return this.nexus.getBounties();
+  }
+
+  @Post("bounties")
+  proposeBounty(@Body() body: { title: string; hostNote?: string; referenceCny?: number }) {
+    return this.nexus.proposeBounty({
+      title: body.title,
+      hostNote: body.hostNote,
+      referenceCny: body.referenceCny,
+    });
+  }
+
+  @Post("bounties/:id/redeem")
+  redeemBounty(@Param("id") id: string) {
+    return this.nexus.redeemBounty(id);
+  }
+
+  @Post("bounties/:id/fulfill")
+  fulfillBounty(@Param("id") id: string, @Body() body?: { evidenceRef?: string }) {
+    return this.nexus.fulfillBounty(id, body?.evidenceRef);
+  }
+
+  @Post("bounties/:id/abandon")
+  abandonBounty(@Param("id") id: string) {
+    return this.nexus.abandonBounty(id);
   }
 
   @Get("evolution")

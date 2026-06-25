@@ -1,16 +1,25 @@
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { Injectable, OnModuleDestroy } from "@nestjs/common";
 import {
   type ChoicePredictionInput,
   type CoachSessionInput,
+  type EconomyDecision,
   type NexusTools,
   Orchestrator,
   type PathSimulationInput,
   clearPromptOverride,
   createLlmClient,
+  evaluateRecalibration,
+  median,
   setPromptOverride,
 } from "@nexus/ai-core";
 import { NexusRepository } from "@nexus/memory";
 import type {
+  BountyActionResult,
+  BountyPriceBreakdown,
+  BountyProposeResult,
+  BountyView,
   CalendarEvent,
   CalendarImportResult,
   DataImportResult,
@@ -22,6 +31,7 @@ import type {
   GraphNode,
   HealthDaySummary,
   InterventionSignal,
+  ModelTier,
   PeriodReport,
   PeriodStats,
   Profile,
@@ -32,12 +42,14 @@ import type {
   ShopView,
   StreakCategory,
   Task,
+  TaskEditInput,
   TaskStatus,
   TaskStatusUpdateEvidence,
   TriggerKind,
 } from "@nexus/shared";
 import {
   ATTRIBUTE_LABELS,
+  BOUNTY_MIN_CREDIBILITY,
   DIVERGENCE_CREDIBILITY_DELTA,
   SHOP_CATALOG,
   isEvolutionTargetAllowed,
@@ -111,6 +123,8 @@ export class NexusService implements OnModuleDestroy {
       ),
   });
   private readonly orchestrator = new Orchestrator(this.llm, this.tools(), this.repository.userId);
+  /** §7 再校准节流：避免每次 loadBounties（同一交互内多次）都重复写库/记事件 */
+  private lastRecalibrationMs = 0;
 
   async onModuleDestroy(): Promise<void> {
     this.repository.close();
@@ -137,9 +151,13 @@ export class NexusService implements OnModuleDestroy {
     };
   }
 
-  async handleChat(message: string, trigger: TriggerKind = "user_message") {
+  async handleChat(
+    message: string,
+    trigger: TriggerKind = "user_message",
+    override?: { modelTier?: ModelTier; model?: string },
+  ) {
     this.repository.markInterventionsRespondedToday();
-    const result = await this.orchestrator.handle(trigger, message);
+    const result = await this.orchestrator.handle(trigger, message, undefined, override);
     if (trigger === "morning_planning") {
       await this.recordStreak("morning_planning");
     }
@@ -167,6 +185,60 @@ export class NexusService implements OnModuleDestroy {
     const task = this.repository.createTask(input);
     await this.syncVault();
     return task;
+  }
+
+  // ── §6.7 数据管理 / #12 计划编辑 ───────────────────────────────────
+  async updateTask(taskId: string, patch: TaskEditInput) {
+    const task = this.repository.updateTask(taskId, patch);
+    await this.syncVault();
+    return task;
+  }
+
+  async deleteTask(taskId: string) {
+    const ok = this.repository.deleteTask(taskId);
+    await this.syncVault();
+    return { ok };
+  }
+
+  deleteEvent(eventId: string) {
+    return { ok: this.repository.deleteEvent(eventId) };
+  }
+
+  deleteReview(reviewId: string) {
+    return { ok: this.repository.deleteReview(reviewId) };
+  }
+
+  /** §6.7 数据管理：某一天（本地日期 YYYY-MM-DD）的任务 / 事件 / 复盘 */
+  getDayData(dateStr: string) {
+    const start = new Date(`${dateStr}T00:00:00`);
+    if (Number.isNaN(start.getTime())) {
+      return { date: dateStr, tasks: [], events: [], reviews: [] };
+    }
+    const startIso = start.toISOString();
+    const endIso = new Date(start.getTime() + 24 * 60 * 60 * 1000).toISOString();
+    const inDay = (iso?: string | null) => !!iso && iso >= startIso && iso < endIso;
+    return {
+      date: dateStr,
+      tasks: this.repository.listTasks().filter((t) => inDay(t.scheduledAt ?? null)),
+      events: this.repository.queryEventsBetween(startIso, endIso),
+      reviews: this.repository.listReviews(100).filter((r) => inDay(r.createdAt)),
+    };
+  }
+
+  /** #10 证据图片：接收 base64 data URL，落地到本地 ./uploads，返回可访问路径 */
+  saveUpload(dataUrl: string, filename?: string): { url: string } {
+    const match = /^data:image\/(png|jpe?g|webp|gif);base64,(.+)$/i.exec(dataUrl ?? "");
+    if (!match) throw new Error("仅支持 png/jpg/webp/gif 的 base64 图片");
+    const [, rawExt = "png", b64 = ""] = match;
+    const ext = rawExt.toLowerCase() === "jpeg" ? "jpg" : rawExt.toLowerCase();
+    const buffer = Buffer.from(b64, "base64");
+    if (buffer.length > 5 * 1024 * 1024) throw new Error("图片不能超过 5MB");
+    const dir = resolve(process.cwd(), "uploads");
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    const safe = (filename ?? "proof").replace(/[^\w.-]+/g, "_").slice(0, 40);
+    const name = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${safe}.${ext}`;
+    writeFileSync(join(dir, name), buffer);
+    return { url: `/uploads/${name}` };
   }
 
   async updateTaskStatus(taskId: string, status: TaskStatus, evidence?: TaskStatusUpdateEvidence) {
@@ -208,6 +280,49 @@ export class NexusService implements OnModuleDestroy {
     }
     await this.syncVault();
     return task;
+  }
+
+  /**
+   * 番茄钟「深度协议」完成一段专注：累加任务 actualMinutes + 奖励专注力 XP（专注靠真实时长挣来，
+   * §8.1）+ 记一条专注事件喂复盘/自欺识别 + 小人反馈。
+   */
+  async recordFocusSession(taskId: string, minutes: number) {
+    const m = Math.max(1, Math.min(180, Math.round(minutes)));
+    const task = this.repository.addTaskFocusMinutes(taskId, m);
+    if (!task) return { ok: false as const, error: "任务不存在" };
+    const focusXp = m; // 1 专注力 XP / 专注分钟
+    this.repository.awardAttributeXp("focus", focusXp);
+    this.repository.logEvent({
+      source: "focus",
+      type: "action",
+      category: "focus_session",
+      rawPayload: { taskId, minutes: m },
+      structured: {
+        summary: `深度协议：专注 ${m} 分钟「${task.title}」，专注力 +${focusXp}`,
+        taskId,
+        minutes: m,
+        focusXp,
+      },
+      occurredAt: new Date().toISOString(),
+      confidence: 1,
+      tags: ["focus", "pomodoro"],
+      relatedGoalIds: task.goalId ? [task.goalId] : [],
+      relatedTaskIds: [taskId],
+    });
+    // 累计专注达到预计时长 → 小人提示可收尾验收（不强制）
+    const reachedEstimate =
+      task.estimatedMinutes != null &&
+      task.actualMinutes != null &&
+      task.actualMinutes >= task.estimatedMinutes;
+    this.repository.updateCompanion({
+      companionId: "main",
+      state: reachedEstimate ? "celebrating" : "focus",
+      dialogue: reachedEstimate
+        ? `「${task.title}」累计专注 ${task.actualMinutes} 分钟，已达预计——够了，可以收尾、交验收了。`
+        : `一个深度协议完成——专注 ${m} 分钟，专注力 +${focusXp}。缓冲一下，或再来一个。`,
+    });
+    await this.syncVault();
+    return { ok: true as const, focusXp, task, reachedEstimate };
   }
 
   /** §6.6.1+6.6.2：记录链活动；命中里程碑时触发微洞察（失败不阻塞主流程）*/
@@ -310,6 +425,274 @@ export class NexusService implements OnModuleDestroy {
   equipSkin(skinId: string) {
     const companion = this.repository.equipSkin(skinId);
     return { equipped: companion.currentForm };
+  }
+
+  // ── 自定义悬赏与 AI 定价（商城子系统规划书）────────────────────────
+
+  /** 心愿单视图：契约列表 + 当前能量/可信度 + 进行中计数（读取前先跑一次再校准）*/
+  getBounties(): BountyView {
+    this.recalibrateBounties();
+    const user = this.repository.getUser();
+    return {
+      bounties: this.repository.listBounties(),
+      energyPoints: user.energyPoints,
+      credibilityScore: user.credibilityScore,
+      activeCount: this.repository.countActiveBounties(),
+    };
+  }
+
+  /**
+   * §7 节奏漂移再校准（自动 + 通知）。打开商城时自动跑：
+   * 赚取节奏持续大幅变化 → 按「同样努力（目标周期）× 新节奏」重定价（双向）；
+   * 进度≥90%/已可兑换 → 永久锁价（临门一脚保护，绝不抽走你快到手的东西）。
+   */
+  private recalibrateBounties(): void {
+    // 节流：30s 内只跑一次（同一次开商城会触发多次 loadBounties，避免重复写库/记事件）
+    if (Date.now() - this.lastRecalibrationMs < 30_000) return;
+    this.lastRecalibrationMs = Date.now();
+
+    const active = this.repository
+      .listBounties()
+      .filter(
+        (b) => (b.state === "saving" || b.state === "redeemable") && !b.priceBreakdown.locked,
+      );
+    if (active.length === 0) return;
+
+    const currentRate = median(this.repository.weeklyEarningBuckets(4));
+    const balance = this.repository.getUser().energyPoints;
+
+    for (const b of active) {
+      const result = evaluateRecalibration({
+        currentPrice: b.price,
+        rateAtPricing: b.priceBreakdown.rWeek,
+        targetHorizonWeeks: b.priceBreakdown.impliedHorizonWeeks,
+        currentRate,
+        balance,
+        locked: b.priceBreakdown.locked ?? false,
+      });
+
+      if (result.action === "lock") {
+        this.repository.updateBountyPricing(b.id, {
+          priceBreakdown: { ...b.priceBreakdown, locked: true },
+        });
+        continue;
+      }
+      if (result.action !== "reprice" || result.newPrice == null) continue;
+
+      const from = b.price;
+      const horizon = result.impliedHorizonWeeks ?? b.priceBreakdown.impliedHorizonWeeks;
+      const breakdown: BountyPriceBreakdown = {
+        ...b.priceBreakdown,
+        rWeek: Math.round(currentRate),
+        impliedHorizonWeeks: horizon,
+        repricedAt: new Date().toISOString(),
+        repriceFrom: from,
+      };
+      const line =
+        result.direction === "up"
+          ? `「${b.title}」已按你的新节奏重定价：${from} → ${result.newPrice} 能量点（赚取节奏提升，目标仍约 ${horizon} 周）。`
+          : `「${b.title}」已按你的新节奏下调：${from} → ${result.newPrice} 能量点（节奏放缓，目标仍约 ${horizon} 周——别灰心）。`;
+
+      this.repository.updateBountyPricing(b.id, {
+        price: result.newPrice,
+        priceBreakdown: breakdown,
+        companionLine: line,
+      });
+      this.repository.logEvent({
+        source: "economy",
+        type: "decision",
+        category: "bounty_repriced",
+        rawPayload: {
+          bountyId: b.id,
+          from,
+          to: result.newPrice,
+          currentRate: Math.round(currentRate),
+          direction: result.direction,
+        },
+        structured: {
+          summary: line,
+          bountyId: b.id,
+          from,
+          to: result.newPrice,
+          direction: result.direction,
+        },
+        occurredAt: new Date().toISOString(),
+        confidence: 1,
+        tags: ["bounty", "repriced", result.direction ?? "up"],
+        relatedGoalIds: [],
+        relatedTaskIds: [],
+      });
+    }
+  }
+
+  /**
+   * 提交心愿 → 经济官一次自主综合评判（提交时定价，无再改价）。
+   * 心愿数量不设上限；唯一前置闸门是可信度危机暂停（§6.1 安全机制）。
+   */
+  async proposeBounty(input: {
+    title: string;
+    hostNote?: string;
+    referenceCny?: number;
+  }): Promise<BountyProposeResult> {
+    const title = input.title?.trim();
+    if (!title) {
+      return { ok: false, verdict: "reject", companionLine: "", error: "请先描述你想要的奖励。" };
+    }
+
+    const user = this.repository.getUser();
+    if (user.credibilityScore < BOUNTY_MIN_CREDIBILITY) {
+      return {
+        ok: false,
+        verdict: "reject",
+        companionLine: "",
+        error: "可信度处于危机状态，已暂停开新悬赏——先把信任重建起来。",
+      };
+    }
+
+    const profile = this.repository.getProfile();
+    const rWeek = this.repository.weeklyEarningRate();
+    const result = await this.orchestrator.runEconomyAppraisal({
+      title,
+      hostNote: input.hostNote,
+      referenceCny: input.referenceCny,
+      rWeek,
+      credibility: user.credibilityScore,
+      redLines: profile.redLines,
+    });
+    const decision = result.structured?.economy as EconomyDecision | undefined;
+    const trace = result.structured?.trace ?? {};
+    if (!decision) {
+      return { ok: false, verdict: "reject", companionLine: "", error: "估值失败，请稍后再试。" };
+    }
+
+    if (decision.verdict === "clarify") {
+      return {
+        ok: true,
+        verdict: "clarify",
+        clarifyingQuestions: decision.clarifyingQuestions,
+        companionLine: decision.companionLine,
+      };
+    }
+
+    if (decision.verdict === "reject") {
+      const bounty = this.repository.saveBounty({
+        title,
+        hostNote: input.hostNote ?? null,
+        valueTier: decision.valueTier,
+        category: decision.category,
+        estimatedValueCny: decision.estimatedValueCny,
+        alignment: decision.alignment,
+        relatedGoalIds: decision.relatedGoalIds,
+        price: 0,
+        priceBreakdown: decision.priceBreakdown,
+        state: "rejected",
+        companionLine: decision.companionLine,
+        rejectReason: decision.rejectReason,
+      });
+      this.logBountyEvent("bounty_rejected", bounty, trace);
+      this.repository.updateCompanion({
+        companionId: "main",
+        state: "strict",
+        dialogue: decision.companionLine,
+      });
+      return {
+        ok: true,
+        verdict: "reject",
+        bounty,
+        companionLine: decision.companionLine,
+        rejectReason: decision.rejectReason ?? undefined,
+      };
+    }
+
+    // verdict = price：锁价落库（已够 → redeemable，否则 saving）
+    const affordable = user.energyPoints >= decision.price;
+    const bounty = this.repository.saveBounty({
+      title,
+      hostNote: input.hostNote ?? null,
+      valueTier: decision.valueTier,
+      category: decision.category,
+      estimatedValueCny: decision.estimatedValueCny,
+      alignment: decision.alignment,
+      relatedGoalIds: decision.relatedGoalIds,
+      price: decision.price,
+      priceBreakdown: decision.priceBreakdown,
+      state: affordable ? "redeemable" : "saving",
+      companionLine: decision.companionLine,
+    });
+    this.logBountyEvent("bounty_priced", bounty, trace);
+    this.repository.updateCompanion({
+      companionId: "main",
+      state: "focus",
+      dialogue: decision.companionLine,
+    });
+    await this.syncVault();
+    return { ok: true, verdict: "price", bounty, companionLine: decision.companionLine };
+  }
+
+  /** 兑现一条悬赏：扣能量 → REDEEMED（一口价、终局）*/
+  redeemBounty(bountyId: string): BountyActionResult {
+    const bounty = this.repository.getBounty(bountyId);
+    if (!bounty) return { ok: false, error: "悬赏不存在" };
+    if (bounty.state !== "saving" && bounty.state !== "redeemable") {
+      return { ok: false, error: "该悬赏当前不可兑现" };
+    }
+    const user = this.repository.getUser();
+    if (user.energyPoints < bounty.price) return { ok: false, error: "能量点不足" };
+    if (!this.repository.spendEnergy(bounty.price)) return { ok: false, error: "能量点不足" };
+
+    const updated = this.repository.updateBountyState(bountyId, "redeemed");
+    this.logBountyEvent("bounty_redeemed", updated ?? bounty, { cost: bounty.price });
+    this.repository.updateCompanion({
+      companionId: "main",
+      state: "celebrating",
+      dialogue: `「${bounty.title}」兑现了——${bounty.price} 能量点换来的，是你自己挣的。去现实里把它拿到手。`,
+    });
+    return { ok: true, bounty: updated ?? bounty, energyPoints: user.energyPoints - bounty.price };
+  }
+
+  /** 确认现实兑现（可选证据，§8 轻量留痕）*/
+  fulfillBounty(bountyId: string, evidenceRef?: string): BountyActionResult {
+    const bounty = this.repository.getBounty(bountyId);
+    if (!bounty) return { ok: false, error: "悬赏不存在" };
+    if (bounty.state !== "redeemed") return { ok: false, error: "仅已兑现的悬赏可确认" };
+    const updated = this.repository.updateBountyState(bountyId, "fulfilled", {
+      evidenceRef: evidenceRef ?? null,
+    });
+    this.logBountyEvent("bounty_fulfilled", updated ?? bounty, { evidenceRef: evidenceRef ?? null });
+    return { ok: true, bounty: updated ?? bounty };
+  }
+
+  /** 放弃一条悬赏（释放并发位）*/
+  abandonBounty(bountyId: string): BountyActionResult {
+    const updated = this.repository.updateBountyState(bountyId, "abandoned");
+    if (!updated) return { ok: false, error: "悬赏不存在" };
+    return { ok: true, bounty: updated };
+  }
+
+  private logBountyEvent(
+    category: string,
+    bounty: { id: string; title: string; price: number; valueTier: string; state: string },
+    raw: unknown,
+  ): void {
+    this.repository.logEvent({
+      source: "economy",
+      type: "decision",
+      category,
+      rawPayload: raw,
+      structured: {
+        summary: `「${bounty.title}」· ${bounty.state} · ${bounty.price} 能量点`,
+        bountyId: bounty.id,
+        title: bounty.title,
+        price: bounty.price,
+        valueTier: bounty.valueTier,
+        state: bounty.state,
+      },
+      occurredAt: new Date().toISOString(),
+      confidence: 1,
+      tags: ["bounty", category.replace("bounty_", "")],
+      relatedGoalIds: [],
+      relatedTaskIds: [],
+    });
   }
 
   // ── 黑箱裁决 §6.7.4 ──────────────────────────────────────────────

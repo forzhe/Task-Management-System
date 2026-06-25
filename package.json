@@ -18,6 +18,7 @@
     "format": "biome format --write .",
     "utf8:guard": "tsx scripts/check-utf8.ts",
     "lint": "biome check .",
+    "seed:maxed": "tsx --env-file=.env scripts/seed-maxed.ts",
     "smoke": "tsx scripts/smoke-test.ts",
     "test": "corepack pnpm -r --if-present test",
     "typecheck": "corepack pnpm -r --if-present typecheck"

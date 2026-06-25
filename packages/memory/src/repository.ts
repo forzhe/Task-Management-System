@@ -7,6 +7,9 @@ import type {
   AttributeMeta,
   AttributeMetaSet,
   AttributeSet,
+  Bounty,
+  BountyPriceBreakdown,
+  BountyState,
   Companion,
   CompanionAction,
   CompanionMemory,
@@ -951,6 +954,17 @@ export class NexusRepository {
     return row ? this.mapTask(row) : null;
   }
 
+  /** 番茄钟/深度协议：把专注分钟累加进任务的 actualMinutes（不改状态）*/
+  addTaskFocusMinutes(taskId: string, minutes: number): Task | null {
+    const task = this.getTask(taskId);
+    if (!task) return null;
+    const newActual = (task.actualMinutes ?? 0) + Math.max(0, Math.round(minutes));
+    this.db
+      .prepare("update tasks set actual_minutes = ? where id = ? and user_id = ?")
+      .run(newActual, taskId, this.userId);
+    return { ...task, actualMinutes: newActual };
+  }
+
   createTask(input: Pick<Task, "title"> & Partial<Task>): Task {
     const task: Task = {
       id: input.id ?? id("task"),
@@ -1055,6 +1069,55 @@ export class NexusRepository {
     };
   }
 
+  /** §6.7 数据管理 / #12 计划编辑：手动修改任务可编辑字段 */
+  updateTask(
+    taskId: string,
+    patch: Partial<
+      Pick<
+        Task,
+        | "title"
+        | "description"
+        | "energyRequired"
+        | "estimatedMinutes"
+        | "rewardPoints"
+        | "acceptanceCriteria"
+        | "proofMethod"
+        | "goalId"
+      >
+    >,
+  ): Task {
+    const task = this.getTask(taskId);
+    if (!task) throw new Error(`Task ${taskId} was not found`);
+    const next: Task = { ...task, ...patch };
+    this.db
+      .prepare(
+        `update tasks set title = ?, description = ?, energy_required = ?, estimated_minutes = ?,
+          reward_points = ?, acceptance_criteria = ?, proof_method = ?, goal_id = ?
+        where id = ? and user_id = ?`,
+      )
+      .run(
+        next.title,
+        next.description ?? null,
+        next.energyRequired,
+        next.estimatedMinutes ?? null,
+        next.rewardPoints,
+        next.acceptanceCriteria,
+        next.proofMethod,
+        next.goalId ?? null,
+        taskId,
+        this.userId,
+      );
+    return next;
+  }
+
+  /** §6.7 数据管理：删除任务 */
+  deleteTask(taskId: string): boolean {
+    const r = this.db
+      .prepare("delete from tasks where id = ? and user_id = ?")
+      .run(taskId, this.userId);
+    return r.changes > 0;
+  }
+
   logEvent(
     input: Omit<NexusEvent, "id" | "userId" | "ingestedAt"> & Partial<NexusEvent>,
   ): NexusEvent {
@@ -1115,6 +1178,24 @@ export class NexusRepository {
       )
       .all(this.userId, sinceIso) as Record<string, unknown>[];
     return rows.map((row) => this.mapEvent(row));
+  }
+
+  /** §6.7 数据管理：取 [startIso, endIso) 区间内的事件（按时间倒序）*/
+  queryEventsBetween(startIso: string, endIso: string): NexusEvent[] {
+    const rows = this.db
+      .prepare(
+        "select * from events where user_id = ? and occurred_at >= ? and occurred_at < ? order by occurred_at desc",
+      )
+      .all(this.userId, startIso, endIso) as Record<string, unknown>[];
+    return rows.map((row) => this.mapEvent(row));
+  }
+
+  /** §6.7 数据管理：删除单条事件 */
+  deleteEvent(eventId: string): boolean {
+    const r = this.db
+      .prepare("delete from events where id = ? and user_id = ?")
+      .run(eventId, this.userId);
+    return r.changes > 0;
   }
 
   /**
@@ -1334,6 +1415,22 @@ export class NexusRepository {
     return row ? this.mapReview(row) : null;
   }
 
+  /** §6.7 数据管理：近期复盘列表（全类型，倒序）*/
+  listReviews(limit = 50): Review[] {
+    const rows = this.db
+      .prepare("select * from reviews where user_id = ? order by created_at desc limit ?")
+      .all(this.userId, limit) as Record<string, unknown>[];
+    return rows.map((row) => this.mapReview(row));
+  }
+
+  /** §6.7 数据管理：删除单条复盘 */
+  deleteReview(reviewId: string): boolean {
+    const r = this.db
+      .prepare("delete from reviews where id = ? and user_id = ?")
+      .run(reviewId, this.userId);
+    return r.changes > 0;
+  }
+
   getCompanion(): Companion {
     const row = this.db
       .prepare("select * from companions where user_id = ? and type = 'main'")
@@ -1395,6 +1492,215 @@ export class NexusRepository {
       .prepare("update companions set current_form = ? where id = ? and user_id = ?")
       .run(skinId, companion.id, this.userId);
     return { ...companion, currentForm: skinId };
+  }
+
+  // ── 自定义悬赏与 AI 定价（商城子系统规划书 §10）──────────────────
+
+  /**
+   * 可持续周赚取率（能量点/周）：近 windowDays 天已完成任务的 rewardPoints 之和 / 周数。
+   * 4 周平均抑制单周脉冲；任务是能量的主来源，作为定价锚足够稳健。无数据返回 0（上层回退默认率）。
+   */
+  weeklyEarningRate(windowDays = 28): number {
+    const since = new Date(Date.now() - windowDays * 86400000).toISOString();
+    const rows = this.db
+      .prepare(
+        `select reward_points from tasks
+         where user_id = ? and completed_at is not null and completed_at >= ?
+           and status in ('completed', 'reviewed')`,
+      )
+      .all(this.userId, since) as Record<string, unknown>[];
+    const total = rows.reduce((sum, r) => sum + Number(r.reward_points ?? 0), 0);
+    const weeks = windowDays / 7;
+    return weeks > 0 ? total / weeks : 0;
+  }
+
+  /**
+   * 近 weeks 周每周的赚取点数桶（index 0 = 最近一周）。用于再校准取中位数，
+   * 比平均更能抵抗"单周爆发"，只有持续变化才会被识别为节奏漂移（§7）。
+   */
+  weeklyEarningBuckets(weeks = 4): number[] {
+    const nowMs = Date.now();
+    const buckets = new Array<number>(weeks).fill(0);
+    const since = new Date(nowMs - weeks * 7 * 86400000).toISOString();
+    const rows = this.db
+      .prepare(
+        `select reward_points, completed_at from tasks
+         where user_id = ? and completed_at is not null and completed_at >= ?
+           and status in ('completed', 'reviewed')`,
+      )
+      .all(this.userId, since) as Record<string, unknown>[];
+    for (const r of rows) {
+      const ageWeeks = Math.floor(
+        (nowMs - new Date(String(r.completed_at)).getTime()) / (7 * 86400000),
+      );
+      if (ageWeeks >= 0 && ageWeeks < weeks) {
+        buckets[ageWeeks] = (buckets[ageWeeks] ?? 0) + Number(r.reward_points ?? 0);
+      }
+    }
+    return buckets;
+  }
+
+  /** 新建一条悬赏契约（价格由 service 经经济官定好后传入；宿主无改价入口）*/
+  saveBounty(input: {
+    title: string;
+    hostNote?: string | null;
+    valueTier: Bounty["valueTier"];
+    category: Bounty["category"];
+    estimatedValueCny: number;
+    alignment: Bounty["alignment"];
+    relatedGoalIds: string[];
+    price: number;
+    priceBreakdown: BountyPriceBreakdown;
+    state: BountyState;
+    companionLine: string;
+    rejectReason?: string | null;
+  }): Bounty {
+    const timestamp = now();
+    const priced = input.state === "rejected" || input.state === "clarify" ? null : timestamp;
+    const bounty: Bounty = {
+      id: id("bounty"),
+      userId: this.userId,
+      title: input.title,
+      hostNote: input.hostNote ?? null,
+      valueTier: input.valueTier,
+      category: input.category,
+      estimatedValueCny: Math.round(input.estimatedValueCny),
+      alignment: input.alignment,
+      relatedGoalIds: input.relatedGoalIds,
+      price: Math.round(input.price),
+      priceBreakdown: input.priceBreakdown,
+      state: input.state,
+      companionLine: input.companionLine,
+      rejectReason: input.rejectReason ?? null,
+      evidenceRef: null,
+      createdAt: timestamp,
+      pricedAt: priced,
+      redeemedAt: null,
+      fulfilledAt: null,
+    };
+    this.db
+      .prepare(
+        `insert into bounties
+         (id, user_id, title, host_note, value_tier, category, estimated_value_cny, alignment,
+          related_goal_ids_json, price, price_breakdown_json, state, companion_line,
+          reject_reason, evidence_ref, created_at, priced_at, redeemed_at, fulfilled_at)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, null, ?, ?, null, null)`,
+      )
+      .run(
+        bounty.id,
+        this.userId,
+        bounty.title,
+        bounty.hostNote ?? null,
+        bounty.valueTier,
+        bounty.category,
+        bounty.estimatedValueCny,
+        bounty.alignment,
+        toJson(bounty.relatedGoalIds),
+        bounty.price,
+        toJson(bounty.priceBreakdown),
+        bounty.state,
+        bounty.companionLine,
+        bounty.rejectReason ?? null,
+        bounty.createdAt,
+        bounty.pricedAt ?? null,
+      );
+    return bounty;
+  }
+
+  listBounties(): Bounty[] {
+    const rows = this.db
+      .prepare("select * from bounties where user_id = ? order by created_at desc")
+      .all(this.userId) as Record<string, unknown>[];
+    return rows.map((row) => this.mapBounty(row));
+  }
+
+  getBounty(bountyId: string): Bounty | null {
+    const row = this.db
+      .prepare("select * from bounties where id = ? and user_id = ?")
+      .get(bountyId, this.userId) as Record<string, unknown> | undefined;
+    return row ? this.mapBounty(row) : null;
+  }
+
+  /** 活跃悬赏数（占用并发位的状态）*/
+  countActiveBounties(): number {
+    const row = this.db
+      .prepare(
+        `select count(*) as n from bounties
+         where user_id = ? and state in ('priced', 'saving', 'redeemable')`,
+      )
+      .get(this.userId) as Record<string, unknown>;
+    return Number(row.n ?? 0);
+  }
+
+  /** 推进悬赏状态（终局态不可再改；时间戳/凭证按状态写入）*/
+  updateBountyState(
+    bountyId: string,
+    state: BountyState,
+    patch?: { evidenceRef?: string | null },
+  ): Bounty | null {
+    const existing = this.getBounty(bountyId);
+    if (!existing) return null;
+    // 终局态不可再改；redeemed 仍可推进到 fulfilled（§8 兑现确认），故不算终局
+    const terminal: BountyState[] = ["fulfilled", "rejected", "abandoned"];
+    if (terminal.includes(existing.state)) return existing;
+
+    const redeemedAt = state === "redeemed" ? now() : existing.redeemedAt ?? null;
+    const fulfilledAt = state === "fulfilled" ? now() : existing.fulfilledAt ?? null;
+    const evidenceRef = patch?.evidenceRef !== undefined ? patch.evidenceRef : existing.evidenceRef ?? null;
+    this.db
+      .prepare(
+        "update bounties set state = ?, redeemed_at = ?, fulfilled_at = ?, evidence_ref = ? where id = ? and user_id = ?",
+      )
+      .run(state, redeemedAt, fulfilledAt, evidenceRef, bountyId, this.userId);
+    return { ...existing, state, redeemedAt, fulfilledAt, evidenceRef };
+  }
+
+  /** 再校准 / 锁价：更新一条 active 悬赏的价格、定价依据与说明（终局态不动）*/
+  updateBountyPricing(
+    bountyId: string,
+    patch: { price?: number; priceBreakdown: BountyPriceBreakdown; companionLine?: string },
+  ): Bounty | null {
+    const existing = this.getBounty(bountyId);
+    if (!existing) return null;
+    if (existing.state !== "saving" && existing.state !== "redeemable") return existing;
+    const price = patch.price ?? existing.price;
+    const companionLine = patch.companionLine ?? existing.companionLine;
+    this.db
+      .prepare(
+        "update bounties set price = ?, price_breakdown_json = ?, companion_line = ? where id = ? and user_id = ?",
+      )
+      .run(price, toJson(patch.priceBreakdown), companionLine, bountyId, this.userId);
+    return { ...existing, price, priceBreakdown: patch.priceBreakdown, companionLine };
+  }
+
+  private mapBounty(row: Record<string, unknown>): Bounty {
+    return {
+      id: String(row.id),
+      userId: String(row.user_id),
+      title: String(row.title),
+      hostNote: row.host_note ? String(row.host_note) : null,
+      valueTier: String(row.value_tier) as Bounty["valueTier"],
+      category: String(row.category ?? "other") as Bounty["category"],
+      estimatedValueCny: Number(row.estimated_value_cny ?? 0),
+      alignment: String(row.alignment) as Bounty["alignment"],
+      relatedGoalIds: parseJson<string[]>(row.related_goal_ids_json as string | null, []),
+      price: Number(row.price ?? 0),
+      priceBreakdown: parseJson<BountyPriceBreakdown>(row.price_breakdown_json as string | null, {
+        rWeek: 0,
+        impliedHorizonWeeks: 0,
+        keyFactors: [],
+        clampApplied: "none",
+        offlineFallback: false,
+      }),
+      state: String(row.state) as BountyState,
+      companionLine: String(row.companion_line ?? ""),
+      rejectReason: row.reject_reason ? String(row.reject_reason) : null,
+      evidenceRef: row.evidence_ref ? String(row.evidence_ref) : null,
+      createdAt: String(row.created_at),
+      pricedAt: row.priced_at ? String(row.priced_at) : null,
+      redeemedAt: row.redeemed_at ? String(row.redeemed_at) : null,
+      fulfilledAt: row.fulfilled_at ? String(row.fulfilled_at) : null,
+    };
   }
 
   private migrate(): void {
@@ -1578,6 +1884,28 @@ export class NexusRepository {
         resolved_at text,
         resolution_note text
       );
+
+      create table if not exists bounties (
+        id text primary key,
+        user_id text not null,
+        title text not null,
+        host_note text,
+        value_tier text not null,
+        category text not null default 'other',
+        estimated_value_cny integer not null default 0,
+        alignment text not null,
+        related_goal_ids_json text not null default '[]',
+        price integer not null default 0,
+        price_breakdown_json text not null default '{}',
+        state text not null,
+        companion_line text not null default '',
+        reject_reason text,
+        evidence_ref text,
+        created_at text not null,
+        priced_at text,
+        redeemed_at text,
+        fulfilled_at text
+      );
     `);
     // Incremental columns added after initial schema — safe to re-run
     for (const stmt of [
@@ -1587,6 +1915,7 @@ export class NexusRepository {
       `alter table system_evolution_logs add column status text not null default 'proposed'`,
       `alter table system_evolution_logs add column target_key text`,
       `alter table system_evolution_logs add column created_at text`,
+      `alter table bounties add column category text not null default 'other'`,
     ]) {
       try { this.db.exec(stmt); } catch { /* column already exists */ }
     }

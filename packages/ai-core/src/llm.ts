@@ -22,6 +22,8 @@ export interface LlmRequest {
   modelTier: ModelTier;
   messages: LlmMessage[];
   maxTokens?: number;
+  /** #12：本次调用强制使用的具体模型名，覆盖按档位映射的模型 */
+  model?: string;
 }
 
 export interface LlmResponse {
@@ -233,7 +235,7 @@ export class AnthropicLlmClient implements LlmClient {
     const messages = request.messages
       .filter((message) => message.role !== "system")
       .map((message) => ({ role: message.role as "user" | "assistant", content: message.content }));
-    const model = this.models[request.modelTier];
+    const model = request.model ?? this.models[request.modelTier];
     try {
       const response = await this.anthropic.messages.create({
         model,
@@ -281,7 +283,8 @@ const PROVIDER_DEFAULTS: Record<OpenAICompatibleProvider, ProviderDefaults> = {
   },
   deepseek: {
     baseURL: "https://api.deepseek.com/v1",
-    models: { haiku: "deepseek-v4-pro", sonnet: "deepseek-v4-pro", opus: "deepseek-v4-pro" },
+    // DeepSeek 官方仅有 deepseek-chat（V3 通用）与 deepseek-reasoner（R1）两个 API 模型 id。
+    models: { haiku: "deepseek-chat", sonnet: "deepseek-chat", opus: "deepseek-chat" },
   },
   kimi: {
     baseURL: "https://api.moonshot.cn/v1",
@@ -318,7 +321,7 @@ export class OpenAICompatibleLlmClient implements LlmClient {
 
   async complete(request: LlmRequest): Promise<LlmResponse> {
     const startedAt = Date.now();
-    const model = this.models[request.modelTier];
+    const model = request.model ?? this.models[request.modelTier];
     try {
       const response = await this.client.chat.completions.create({
         model,

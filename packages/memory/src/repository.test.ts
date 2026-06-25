@@ -101,6 +101,7 @@ describe("NexusRepository schema bootstrap", () => {
           "intervention_log",
           "profile_change_log",
           "divergences",
+          "bounties",
         ]),
       );
 
@@ -344,6 +345,141 @@ describe("NexusRepository black-box arbitration", () => {
       // 已裁决不可再改（追踪记录不可篡改）
       const again = repository.updateDivergenceStatus(d.id, "confirmed");
       expect(again?.status).toBe("refuted");
+    } finally {
+      repository.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("NexusRepository bounties (custom rewards + AI pricing)", () => {
+  it("creates bounties, counts active ones, and advances state to a terminal point", async () => {
+    const root = await mkdtemp(join(tmpdir(), "nexus-memory-bounty-"));
+    const repository = new NexusRepository({ dbPath: join(root, "nexus.db"), userId: "bounty-host" });
+    try {
+      const breakdown = {
+        rWeek: 800,
+        impliedHorizonWeeks: 12,
+        keyFactors: ["赚取率 800/周"],
+        clampApplied: "none" as const,
+        offlineFallback: false,
+      };
+      const bounty = repository.saveBounty({
+        title: "一部新手机",
+        valueTier: "large",
+        category: "electronics",
+        estimatedValueCny: 5000,
+        alignment: "neutral",
+        relatedGoalIds: [],
+        price: 9600,
+        priceBreakdown: breakdown,
+        state: "saving",
+        companionLine: "约 12 周可以够到。",
+      });
+      expect(bounty.price).toBe(9600);
+      expect(bounty.category).toBe("electronics");
+      expect(bounty.pricedAt).toBeTruthy();
+      expect(repository.listBounties()).toHaveLength(1);
+      expect(repository.getBounty(bounty.id)?.title).toBe("一部新手机");
+      expect(repository.countActiveBounties()).toBe(1);
+
+      // 兑现：扣能量后推进到 redeemed
+      const redeemed = repository.updateBountyState(bounty.id, "redeemed");
+      expect(redeemed?.state).toBe("redeemed");
+      expect(redeemed?.redeemedAt).toBeTruthy();
+      expect(repository.countActiveBounties()).toBe(0);
+
+      // redeemed 仍可推进到 fulfilled（§8 兑现确认）
+      const fulfilled = repository.updateBountyState(bounty.id, "fulfilled", { evidenceRef: "/uploads/x.png" });
+      expect(fulfilled?.state).toBe("fulfilled");
+      expect(fulfilled?.evidenceRef).toBe("/uploads/x.png");
+
+      // fulfilled 是终局，不可再改
+      const again = repository.updateBountyState(bounty.id, "saving");
+      expect(again?.state).toBe("fulfilled");
+    } finally {
+      repository.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("derives a weekly earning rate from completed-task rewards", async () => {
+    const root = await mkdtemp(join(tmpdir(), "nexus-memory-rate-"));
+    const repository = new NexusRepository({ dbPath: join(root, "nexus.db"), userId: "rate-host" });
+    try {
+      expect(repository.weeklyEarningRate()).toBe(0);
+      const task = repository.createTask({
+        title: "攒能量",
+        rewardPoints: 280,
+        acceptanceCriteria: "x",
+        proofMethod: "y",
+      });
+      repository.updateTaskStatus(task.id, "completed");
+      // 280 点 / 4 周
+      expect(repository.weeklyEarningRate(28)).toBeCloseTo(70, 5);
+    } finally {
+      repository.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("supports recalibration: weekly buckets + price update on active bounties only", async () => {
+    const root = await mkdtemp(join(tmpdir(), "nexus-memory-recal-"));
+    const repository = new NexusRepository({ dbPath: join(root, "nexus.db"), userId: "recal-host" });
+    try {
+      const task = repository.createTask({
+        title: "攒能量",
+        rewardPoints: 120,
+        acceptanceCriteria: "x",
+        proofMethod: "y",
+      });
+      repository.updateTaskStatus(task.id, "completed");
+      const buckets = repository.weeklyEarningBuckets(4);
+      expect(buckets).toHaveLength(4);
+      expect(buckets[0]).toBe(120); // 本周
+      expect(buckets[1]).toBe(0);
+
+      const b = repository.saveBounty({
+        title: "手机",
+        valueTier: "large",
+        category: "electronics",
+        estimatedValueCny: 5000,
+        alignment: "neutral",
+        relatedGoalIds: [],
+        price: 68,
+        priceBreakdown: {
+          rWeek: 4,
+          impliedHorizonWeeks: 17,
+          keyFactors: [],
+          clampApplied: "none",
+          offlineFallback: true,
+        },
+        state: "saving",
+        companionLine: "x",
+      });
+      const repriced = repository.updateBountyPricing(b.id, {
+        price: 6800,
+        priceBreakdown: {
+          rWeek: 400,
+          impliedHorizonWeeks: 17,
+          keyFactors: [],
+          clampApplied: "none",
+          offlineFallback: true,
+          repricedAt: new Date().toISOString(),
+          repriceFrom: 68,
+        },
+        companionLine: "已按新节奏调价",
+      });
+      expect(repriced?.price).toBe(6800);
+      expect(repository.getBounty(b.id)?.priceBreakdown.repriceFrom).toBe(68);
+
+      // 终局态（已兑现）不再被改价
+      repository.updateBountyState(b.id, "redeemed");
+      const after = repository.updateBountyPricing(b.id, {
+        price: 1,
+        priceBreakdown: repriced!.priceBreakdown,
+      });
+      expect(after?.price).toBe(6800);
     } finally {
       repository.close();
       await rm(root, { recursive: true, force: true });

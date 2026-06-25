@@ -5,6 +5,7 @@ import type {
   GoalStatus,
   InsightOutput,
   NexusEvent,
+  PlanningOutput,
   Profile,
   ProfileChangeProposal,
   ProfileUpdateInput,
@@ -15,9 +16,10 @@ import type {
   User,
   UserStreak,
 } from "@nexus/shared";
-import type { CalendarEvent, ChoicePredictionOutput, DataImportResult, DeepAnalysis, Divergence, EvolutionProposal, FinanceSummary, HealthDaySummary, PathSimulationOutput, PeriodReport, RelationshipGraph, ShopView, StewardOutput } from "@nexus/shared";
+import type { BountyProposeResult, BountyView, CalendarEvent, ChoicePredictionOutput, DataImportResult, DeepAnalysis, Divergence, EvolutionProposal, FinanceSummary, HealthDaySummary, PathSimulationOutput, PeriodReport, RelationshipGraph, ShopView, StewardOutput } from "@nexus/shared";
+import type { TaskEditInput } from "@nexus/shared";
 import { defineStore } from "pinia";
-import { api, type NetGrowthSnapshot } from "./api";
+import { api, type DayData, type NetGrowthSnapshot, type PlanModelOverride } from "./api";
 
 export interface ChatLine {
   role: "host" | "nexus";
@@ -29,6 +31,7 @@ export const useNexusStore = defineStore("nexus", {
   state: () => ({
     loading: false,
     offlineLlm: true,
+    llmProvider: "",
     awConnected: false,
     awFocusMinutes: 0,
     user: null as User | null,
@@ -39,6 +42,7 @@ export const useNexusStore = defineStore("nexus", {
     latestReview: null as Review | null,
     companion: null as Companion | null,
     chat: [] as ChatLine[],
+    lastPlan: null as PlanningOutput | null,
     latestInsight: null as InsightOutput | null,
     streaks: [] as UserStreak[],
     profileChanges: [] as ProfileChangeProposal[],
@@ -56,8 +60,11 @@ export const useNexusStore = defineStore("nexus", {
     learningSteward: null as StewardOutput | null,
     divergences: [] as Divergence[],
     shop: null as ShopView | null,
+    bounties: null as BountyView | null,
+    lastBountyResult: null as BountyProposeResult | null,
     deepAnalysis: null as DeepAnalysis | null,
     evolution: [] as EvolutionProposal[],
+    dayData: null as DayData | null,
     error: "",
   }),
   getters: {
@@ -72,7 +79,7 @@ export const useNexusStore = defineStore("nexus", {
       this.loading = true;
       this.error = "";
       try {
-        const [health, user, profile, goals, tasks, events, latestReview, companion, streaks, profileChanges, netGrowth, report, graph, recentHealth, financeSummary, divergences, shop, upcomingCalendar, evolution] = await Promise.all([
+        const [health, user, profile, goals, tasks, events, latestReview, companion, streaks, profileChanges, netGrowth, report, graph, recentHealth, financeSummary, divergences, shop, upcomingCalendar, evolution, bounties] = await Promise.all([
           api.health(),
           api.user(),
           api.profile(),
@@ -92,8 +99,10 @@ export const useNexusStore = defineStore("nexus", {
           api.shop(),
           api.upcomingCalendar(),
           api.evolution(),
+          api.bounties(),
         ]);
         this.offlineLlm = health.offlineLlm;
+        this.llmProvider = health.llmProvider;
         this.user = user;
         this.profile = profile;
         this.goals = goals;
@@ -112,6 +121,7 @@ export const useNexusStore = defineStore("nexus", {
         this.shop = shop;
         this.upcomingCalendar = upcomingCalendar;
         this.evolution = evolution;
+        this.bounties = bounties;
         // AW status is best-effort, never blocks the main refresh
         api
           .awStatus()
@@ -138,11 +148,80 @@ export const useNexusStore = defineStore("nexus", {
         this.error = error instanceof Error ? error.message : String(error);
       }
     },
-    async morningPlan() {
+    async morningPlan(override?: PlanModelOverride) {
       try {
-        const result = await api.morningPlan();
+        const result = await api.morningPlan(override);
         this.captureResult(result);
         await this.refresh();
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    /** #12 重做晨间规划：先清掉当天 AI 生成的任务，再用（可选的）新模型重生成 */
+    async regenerateMorning(override?: PlanModelOverride) {
+      try {
+        const today = new Date();
+        const isToday = (iso?: string | null) => {
+          if (!iso) return false;
+          const d = new Date(iso);
+          return (
+            d.getFullYear() === today.getFullYear() &&
+            d.getMonth() === today.getMonth() &&
+            d.getDate() === today.getDate()
+          );
+        };
+        for (const t of this.tasks) {
+          if (t.source === "ai" && isToday(t.scheduledAt ?? null)) {
+            await api.deleteTask(t.id);
+          }
+        }
+        const result = await api.morningPlan(override);
+        this.captureResult(result);
+        await this.refresh();
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    /** §6.7 数据管理 / #12 计划编辑 */
+    async editTask(id: string, patch: TaskEditInput) {
+      try {
+        await api.editTask(id, patch);
+        await this.refresh();
+        if (this.dayData) await this.loadDayData(this.dayData.date);
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    async removeTask(id: string) {
+      try {
+        await api.deleteTask(id);
+        await this.refresh();
+        if (this.dayData) await this.loadDayData(this.dayData.date);
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    async removeEvent(id: string) {
+      try {
+        await api.deleteEvent(id);
+        await this.refresh();
+        if (this.dayData) await this.loadDayData(this.dayData.date);
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    async removeReview(id: string) {
+      try {
+        await api.deleteReview(id);
+        await this.refresh();
+        if (this.dayData) await this.loadDayData(this.dayData.date);
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    async loadDayData(date: string) {
+      try {
+        this.dayData = await api.dayData(date);
       } catch (error) {
         this.error = error instanceof Error ? error.message : String(error);
       }
@@ -189,6 +268,18 @@ export const useNexusStore = defineStore("nexus", {
         await this.refresh();
       } catch (error) {
         this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    /** 番茄钟完成一段专注 → 累加 actualMinutes + 专注力 XP */
+    async recordFocusSession(taskId: string, minutes: number) {
+      try {
+        const r = await api.recordFocusSession(taskId, minutes);
+        if (!r.ok && r.error) this.error = r.error;
+        await this.refresh();
+        return r;
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+        return null;
       }
     },
     async simulatePath(scenario: string, paths: string[]) {
@@ -263,6 +354,57 @@ export const useNexusStore = defineStore("nexus", {
       try {
         await api.equipSkin(skinId);
         await this.loadShop();
+        await this.refresh();
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    async loadBounties() {
+      try {
+        this.bounties = await api.bounties();
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    /** 提交心愿 → 经济官估值。返回结果供 UI 区分定价/澄清/婉拒 */
+    async proposeBounty(title: string, hostNote?: string, referenceCny?: number) {
+      try {
+        const result = await api.proposeBounty(title, hostNote, referenceCny);
+        this.lastBountyResult = result;
+        if (!result.ok && result.error) this.error = result.error;
+        await this.loadBounties();
+        await this.refresh();
+        return result;
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+        return null;
+      }
+    },
+    clearBountyResult() {
+      this.lastBountyResult = null;
+    },
+    async redeemBounty(id: string) {
+      try {
+        const result = await api.redeemBounty(id);
+        if (!result.ok && result.error) this.error = result.error;
+        await this.loadBounties();
+        await this.refresh();
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    async fulfillBounty(id: string) {
+      try {
+        await api.fulfillBounty(id);
+        await this.loadBounties();
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    async abandonBounty(id: string) {
+      try {
+        await api.abandonBounty(id);
+        await this.loadBounties();
         await this.refresh();
       } catch (error) {
         this.error = error instanceof Error ? error.message : String(error);
@@ -472,6 +614,9 @@ export const useNexusStore = defineStore("nexus", {
       if (result.response) {
         this.chat.push({ role: "nexus", text: result.response, at: new Date().toISOString() });
       }
+      const planning = (result.structured as { planning?: { data?: PlanningOutput } } | undefined)
+        ?.planning;
+      if (planning?.data) this.lastPlan = planning.data;
       if (result.companionAction && this.companion) {
         this.companion = {
           ...this.companion,

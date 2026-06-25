@@ -1,4 +1,4 @@
-import type { AgentContext, AgentResult, BrowserVisitSummary, FinanceSummary, HealthDaySummary, ScreenActivitySummary, StewardOutput, TriggerKind } from "@nexus/shared";
+import type { AgentContext, AgentResult, BrowserVisitSummary, FinanceSummary, HealthDaySummary, ModelTier, ScreenActivitySummary, StewardOutput, TriggerKind } from "@nexus/shared";
 import { CompanionAgent } from "./agents/companion-agent.js";
 import { CoachAgent, type CoachSessionInput } from "./agents/coach-agent.js";
 import {
@@ -7,6 +7,7 @@ import {
   type PathSimulationInput,
 } from "./agents/decision-agent.js";
 import { DialogueAgent } from "./agents/dialogue-agent.js";
+import { EconomyAgent, type EconomyInput } from "./agents/economy-agent.js";
 import { EvolutionAgent, type EvolutionInput } from "./agents/evolution-agent.js";
 import { HealthStewardAgent, type HealthStewardInput } from "./agents/health-steward-agent.js";
 import { InsightAgent } from "./agents/insight-agent.js";
@@ -45,6 +46,7 @@ export class Orchestrator {
   private readonly reportAgent: ReportAgent;
   private readonly healthSteward: HealthStewardAgent;
   private readonly learningSteward: LearningStewardAgent;
+  private readonly economyAgent: EconomyAgent;
   private readonly evolutionAgent: EvolutionAgent;
   private readonly safetyAgent = new SafetyAgent();
 
@@ -66,6 +68,7 @@ export class Orchestrator {
     this.reportAgent = new ReportAgent(llm, this.router, tools);
     this.healthSteward = new HealthStewardAgent(llm, this.router, tools);
     this.learningSteward = new LearningStewardAgent(llm, this.router, tools);
+    this.economyAgent = new EconomyAgent(llm, this.router, tools);
     this.evolutionAgent = new EvolutionAgent(llm, this.router, tools);
   }
 
@@ -78,8 +81,9 @@ export class Orchestrator {
       healthToday?: HealthDaySummary;
       financeRecent?: FinanceSummary;
     },
+    override?: { modelTier?: ModelTier; model?: string },
   ): Promise<AgentResult> {
-    const context = this.buildContext(trigger, message, extras);
+    const context = this.buildContext(trigger, message, extras, override);
     const primary = await this.dispatch(context);
     const companion = await this.companionAgent.run(context);
     return this.safetyAgent.run(context, {
@@ -156,6 +160,12 @@ export class Orchestrator {
   /** §6.4 系统进化引擎（仅提议）*/
   async runEvolution(input: EvolutionInput): Promise<AgentResult> {
     return this.evolutionAgent.run(input);
+  }
+
+  /** 商城子系统：经济官对宿主心愿做一次综合估值定价（提交时一次性，无再改价）*/
+  async runEconomyAppraisal(input: EconomyInput): Promise<AgentResult> {
+    const context = this.buildContext("companion_tick");
+    return this.economyAgent.run(context, input);
   }
 
   /**
@@ -235,13 +245,23 @@ export class Orchestrator {
       healthToday?: HealthDaySummary;
       financeRecent?: FinanceSummary;
     },
+    override?: { modelTier?: ModelTier; model?: string },
   ): AgentContext {
     const profile = this.tools.getUserProfile();
+    // 宿主在觉醒仪式里选过 strict/gentle，这里据此给全体 Agent 一个统一语气指令；默认温和。
+    const preference = (profile.basicInfo as { personalityPreference?: string }).personalityPreference;
+    const tone =
+      preference === "strict"
+        ? "语气偏好=直接克制：简洁、可直接点名问题，但保持尊重，不嘲讽、不说教、不贴人格标签。"
+        : "语气偏好=温和陪伴：先认可已发生的努力，再具体指出问题与下一步；如实但不冷硬、不评判其为人。";
     const profileSummary = [
       `基本信息=${JSON.stringify(profile.basicInfo)}`,
       `动机=${JSON.stringify(profile.motivations)}`,
       `红线=${profile.redLines.join("、")}`,
       `长期愿景=${JSON.stringify(profile.longTermVision)}`,
+      // #2 性格/风格画像：作息节律、动机类型、做事风格等，供 Agent 因人调整方案与语气
+      `特质画像=${JSON.stringify(profile.traits)}`,
+      tone,
     ].join("\n");
 
     return {
@@ -257,6 +277,8 @@ export class Orchestrator {
       browserVisits: extras?.browserVisits,
       healthToday: extras?.healthToday,
       financeRecent: extras?.financeRecent,
+      modelTierOverride: override?.modelTier,
+      modelOverride: override?.model,
     };
   }
 }

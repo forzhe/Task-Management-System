@@ -45,6 +45,7 @@ const apiMock = vi.hoisted(() => ({
   shop: vi.fn(),
   purchaseShopItem: vi.fn(),
   equipSkin: vi.fn(),
+  bounties: vi.fn(),
   deepAnalysis: vi.fn(),
   evolution: vi.fn(),
   runEvolution: vi.fn(),
@@ -165,6 +166,12 @@ function mockRefreshPayload(
     equipped: "default",
     energyPoints: 0,
     credibilityScore: 1,
+  });
+  apiMock.bounties.mockResolvedValue({
+    bounties: [],
+    energyPoints: 0,
+    credibilityScore: 1,
+    activeCount: 0,
   });
 }
 

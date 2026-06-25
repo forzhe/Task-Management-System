@@ -188,3 +188,26 @@ export const profileChangeLog = sqliteTable("profile_change_log", {
   createdAt: text("created_at").notNull(),
   resolvedAt: text("resolved_at"),
 });
+
+// ── 自定义悬赏与 AI 定价（商城子系统）─────────────────────────────
+export const bounties = sqliteTable("bounties", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  title: text("title").notNull(),
+  hostNote: text("host_note"),
+  valueTier: text("value_tier").notNull(),
+  category: text("category").notNull().default("other"),
+  estimatedValueCny: integer("estimated_value_cny").notNull().default(0),
+  alignment: text("alignment").notNull(),
+  relatedGoalIdsJson: text("related_goal_ids_json").notNull().default("[]"),
+  price: integer("price").notNull().default(0),
+  priceBreakdownJson: text("price_breakdown_json").notNull().default("{}"),
+  state: text("state").notNull(),
+  companionLine: text("companion_line").notNull().default(""),
+  rejectReason: text("reject_reason"),
+  evidenceRef: text("evidence_ref"),
+  createdAt: text("created_at").notNull(),
+  pricedAt: text("priced_at"),
+  redeemedAt: text("redeemed_at"),
+  fulfilledAt: text("fulfilled_at"),
+});
