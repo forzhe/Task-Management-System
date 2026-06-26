@@ -6,6 +6,7 @@ export * from "./structured-output.js";
 export * from "./steward-aggregate.js";
 export * from "./economy/pricing.js";
 export * from "./tools.js";
+export * from "./profile/observation.js";
 export type { CoachSessionInput } from "./agents/coach-agent.js";
 export type { ChoicePredictionInput, PathSimulationInput } from "./agents/decision-agent.js";
 export type { PeriodReportInput } from "./agents/report-agent.js";

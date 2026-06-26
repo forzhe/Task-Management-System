@@ -8,6 +8,7 @@ import type {
   PlanningOutput,
   Profile,
   ProfileChangeProposal,
+  ProfileObservation,
   ProfileUpdateInput,
   Review,
   Task,
@@ -46,6 +47,10 @@ export const useNexusStore = defineStore("nexus", {
     latestInsight: null as InsightOutput | null,
     streaks: [] as UserStreak[],
     profileChanges: [] as ProfileChangeProposal[],
+    profileChangeHistory: [] as ProfileChangeProposal[],
+    observation: null as ProfileObservation | null,
+    observationTrend: [] as ProfileObservation[],
+    observationLoading: false,
     netGrowth: null as NetGrowthSnapshot | null,
     choicePrediction: null as ChoicePredictionOutput | null,
     report: null as PeriodReport | null,
@@ -596,8 +601,45 @@ export const useNexusStore = defineStore("nexus", {
       try {
         await api.resolveProfileChange(id, accept);
         await this.refresh();
+        await this.loadProfilePanel();
       } catch (error) {
         this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    async rollbackProfileChange(id: string) {
+      try {
+        await api.rollbackProfileChange(id);
+        await this.refresh();
+        await this.loadProfilePanel();
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    // 宿主档案 · 观测层：载入最新画像 + 时间线 + 演化历史（打开档案模块时调用）
+    async loadProfilePanel() {
+      try {
+        const [obs, history] = await Promise.all([
+          api.profileObservation(),
+          api.profileChangeHistory(),
+        ]);
+        this.observation = obs.latest;
+        this.observationTrend = obs.trend;
+        this.profileChangeHistory = history;
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    // 手动深扫：刷新画像并检测 MBTI 漂移（可能产出高风险演化提议）
+    async runProfileObservation() {
+      this.observationLoading = true;
+      try {
+        await api.runProfileObservation();
+        await this.loadProfilePanel();
+        await this.refresh();
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      } finally {
+        this.observationLoading = false;
       }
     },
     async weeklyInsight() {

@@ -28,6 +28,7 @@ import {
 } from "./agents/streak-agent.js";
 import type { LlmClient } from "./llm.js";
 import { ModelRouter } from "./model-router.js";
+import { computeProfileObservation, deriveMbtiProposals } from "./profile/observation.js";
 import { aggregateStewardLines, aggregateStewardState } from "./steward-aggregate.js";
 import type { NexusTools } from "./tools.js";
 
@@ -120,6 +121,50 @@ export class Orchestrator {
   async runProfileEvolution(deep = false): Promise<AgentResult> {
     const context = this.buildContext(deep ? "system" : "daily_review");
     return this.profileAgent.run(context);
+  }
+
+  /**
+   * 宿主档案 · 观测层（活体画像）刷新（规划书 §6）。
+   * 确定性引擎计算六维画像快照 → 落事件流（profile_observation）；
+   * deep=true（手动深扫）时额外做 MBTI 漂移检测，产出高风险演化提议（只提议、必裁决）。
+   */
+  async runProfileObservation(deep = false): Promise<AgentResult> {
+    const events = this.tools.queryEvents(deep ? 400 : 150);
+    const profile = this.tools.getUserProfile();
+    const observation = computeProfileObservation(events, profile, {
+      windowDays: deep ? 28 : 14,
+      source: deep ? "deep-scan" : "daily",
+    });
+
+    const event = this.tools.logEvent({
+      source: "profiler",
+      type: "agent_output",
+      category: "profile_observation",
+      rawPayload: { deep },
+      structured: {
+        summary: observation.summary,
+        observation: observation as unknown as Record<string, unknown>,
+      },
+      occurredAt: observation.takenAt,
+      confidence: 0.7,
+      tags: ["profile", "observation", observation.source],
+      relatedGoalIds: [],
+      relatedTaskIds: [],
+    });
+
+    // P4：高风险演化提议只在深扫触发（避免日终每天打扰），且需通过漂移阈值
+    const proposalIds: string[] = [];
+    if (deep) {
+      for (const draft of deriveMbtiProposals(observation, profile)) {
+        proposalIds.push(this.tools.saveProfileChangeProposal(draft).id);
+      }
+    }
+
+    return {
+      response: observation.summary,
+      structured: { observation: observation as unknown as Record<string, unknown>, proposalIds },
+      events: [event],
+    };
   }
 
   /** §8 今日净成长值 */

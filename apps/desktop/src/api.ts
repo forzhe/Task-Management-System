@@ -20,6 +20,7 @@ import type {
   NexusEvent,
   PeriodReport,
   Profile,
+  ProfileObservation,
   ProfileUpdateInput,
   RelationshipGraph,
   Review,
@@ -191,6 +192,7 @@ export const api = {
   streaks: () => request<UserStreak[]>("/streaks"),
   profileChanges: () =>
     request<ProfileChangeProposal[]>("/profile/changes?status=pending"),
+  profileChangeHistory: () => request<ProfileChangeProposal[]>("/profile/changes"),
   runProfileEvolution: () =>
     request<AgentResult>("/profile/evolution/scan", { method: "POST", body: "{}" }),
   resolveProfileChange: (id: string, accept: boolean) =>
@@ -198,6 +200,18 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ accept }),
     }),
+  rollbackProfileChange: (id: string) =>
+    request<{ proposal: ProfileChangeProposal }>(`/profile/changes/${id}/rollback`, {
+      method: "POST",
+      body: "{}",
+    }),
+  // 宿主档案 · 观测层（活体画像）
+  profileObservation: () =>
+    request<{ latest: ProfileObservation | null; trend: ProfileObservation[] }>(
+      "/profile/observation",
+    ),
+  runProfileObservation: () =>
+    request<AgentResult>("/profile/observation/scan", { method: "POST", body: "{}" }),
   netGrowth: () => request<NetGrowthSnapshot | null>("/decision/net-growth"),
   runNetGrowth: () =>
     request<AgentResult>("/decision/net-growth", { method: "POST", body: "{}" }),

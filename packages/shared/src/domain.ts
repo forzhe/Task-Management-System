@@ -1007,6 +1007,214 @@ export interface ProfileEvolutionOutput {
   }>;
 }
 
+/** 演化提议的风险分级（宿主档案子系统规划书 §8.1）。
+ *  低风险=观测层自更新；中/高风险=必须宿主裁决（高风险=身份/红线/愿景）。*/
+export type ProfileRiskTier = "low" | "medium" | "high";
+
+export function profileFieldRiskTier(
+  field: ProfileFieldPath,
+  subPath?: string | null,
+): ProfileRiskTier {
+  if (field === "redLines" || field === "longTermVision" || field === "basicInfo") return "high";
+  if (field === "traits" && subPath === "mbti") return "high";
+  return "medium";
+}
+
+// ── 宿主档案 · 观测层（活体画像）宿主档案子系统规划书 §6 ───────────────
+
+/** 观测层六维（画像「模式」，区别于六维属性「能力」）*/
+export type ObservedDim = "rhythm" | "focus" | "drive" | "execution" | "discipline" | "creativity";
+
+export const OBSERVED_DIM_KEYS: readonly ObservedDim[] = [
+  "rhythm",
+  "focus",
+  "drive",
+  "execution",
+  "discipline",
+  "creativity",
+];
+
+export const OBSERVED_DIM_LABELS: Record<ObservedDim, string> = {
+  rhythm: "作息节律",
+  focus: "专注模式",
+  drive: "驱动来源",
+  execution: "执行风格",
+  discipline: "自律强度",
+  creativity: "创造倾向",
+};
+
+export interface ObservedDimValue {
+  /** 0..1，越高=该模式越强 */
+  score: number;
+  /** 0..1，证据充分度 */
+  confidence: number;
+  /** 证据条数 */
+  sampleN: number;
+  /** 人类可读注解（如「高峰在清晨」「平均专注 42 分钟」）*/
+  note?: string;
+}
+
+export type MbtiAxisKey = "EI" | "SN" | "TF" | "JP";
+
+export const MBTI_AXIS_KEYS: readonly MbtiAxisKey[] = ["EI", "SN", "TF", "JP"];
+
+/** MBTI 单轴的行为证据（与自评基线并行，互不覆盖；规划书 §7.3）*/
+export interface MbtiAxisEvidence {
+  /** 当前证据偏向的极，如 "E" / "I"；证据不足时为空串 */
+  lean: string;
+  /** 0..1，朝向 lean 的强度 */
+  score: number;
+  /** 0..1 */
+  confidence: number;
+  sampleN: number;
+}
+
+/** 红线契合度（规划书 §6.2 / §5 数据模型）*/
+export interface RedLineFit {
+  line: string;
+  /** 0..1，1=完全契合 */
+  adherence: number;
+  /** 观测窗内触碰次数 */
+  breaches: number;
+}
+
+export type NetGrowthVerdict = "closer" | "neutral" | "further";
+
+/** 观测层快照：每日落事件流（category="profile_observation"），最新一条即「活体画像」*/
+export interface ProfileObservation {
+  takenAt: ISODateTime;
+  /** 观测窗口（天）*/
+  windowDays: number;
+  dimensions: Record<ObservedDim, ObservedDimValue>;
+  mbtiEvidence: Record<MbtiAxisKey, MbtiAxisEvidence>;
+  redLineFit: RedLineFit[];
+  /** 对照长期愿景：今天比昨天更近/持平/更远 */
+  netGrowthVerdict: NetGrowthVerdict;
+  /** 观测窗内净增长均值（-100..100），周期评级的主信号 */
+  netGrowthScore: number;
+  source: "daily" | "deep-scan";
+  engine: "deterministic" | "llm";
+  summary: string;
+}
+
+// ── 宿主档案 · 周期评级（对齐导向：净增长为主，自律/连续/可信为辅）──────
+
+export type ProfileGrade = "S" | "A" | "B" | "C" | "D";
+
+export interface ProfileAssessmentInput {
+  observation: ProfileObservation | null;
+  /** 可信度 0..2（§6.1）*/
+  credibility?: number;
+  /** 当前最长连续天数 */
+  longestStreak?: number;
+}
+
+export interface ProfileAssessment {
+  grade: ProfileGrade;
+  /** 综合分 0..1 */
+  composite: number;
+  /** 状态标签：状态优异 / 稳步推进 / 轻度懈怠 / 效率下滑 / 偏科明显 */
+  statusLabel: string;
+  statusTone: "good" | "watch" | "alert";
+  verdict: NetGrowthVerdict;
+  /** 最弱观测维（证据不足时为 null）*/
+  weakestDim: ObservedDim | null;
+  weakestLabel: string;
+  /** 一行偏差摘要（hero 带主文案）*/
+  headline: string;
+  /** 评级输入因子，0..1，便于 UI 画小条 */
+  factors: { netGrowth: number; discipline: number; streak: number; credibility: number };
+}
+
+const clamp01Local = (x: number): number =>
+  Number.isFinite(x) ? Math.min(1, Math.max(0, x)) : 0;
+
+/**
+ * 宿主档案周期评级（纯函数，对齐导向）。
+ * 主信号=净增长趋势（50%）；辅信号=自律(20%) / 连续力(15%) / 可信度(15%)。
+ * 刻意不计「用功时长」，避免退化成机械打卡（禁区精神）。
+ */
+export function assessProfileGrade(input: ProfileAssessmentInput): ProfileAssessment {
+  const obs = input.observation;
+  const verdict: NetGrowthVerdict = obs?.netGrowthVerdict ?? "neutral";
+
+  // 因子归一到 0..1
+  const ng = clamp01Local(((obs?.netGrowthScore ?? 0) + 40) / 80); // -40→0, 0→0.5, +40→1
+  const discipline = clamp01Local(obs?.dimensions.discipline.score ?? 0);
+  const streak = clamp01Local((input.longestStreak ?? 0) / 30); // 30 天封顶
+  const credibility = clamp01Local(((input.credibility ?? 1) - 0.5) / 1.0); // 1.0→0.5
+
+  const composite = clamp01Local(
+    0.5 * ng + 0.2 * discipline + 0.15 * streak + 0.15 * credibility,
+  );
+
+  const grade: ProfileGrade =
+    composite >= 0.8 ? "S" : composite >= 0.65 ? "A" : composite >= 0.45 ? "B" : composite >= 0.3 ? "C" : "D";
+
+  // 最弱观测维（仅在有证据的维里挑，避免把"没观测到"误判为"弱"）
+  let weakestDim: ObservedDim | null = null;
+  let weakestScore = Infinity;
+  if (obs) {
+    for (const key of OBSERVED_DIM_KEYS) {
+      const d = obs.dimensions[key];
+      if (d.confidence >= 0.2 && d.score < weakestScore) {
+        weakestScore = d.score;
+        weakestDim = key;
+      }
+    }
+  }
+  const weakestLabel = weakestDim ? OBSERVED_DIM_LABELS[weakestDim] : "证据不足";
+
+  // 偏科判定：有证据维之间分差过大
+  const scored = obs
+    ? OBSERVED_DIM_KEYS.map((k) => obs.dimensions[k]).filter((d) => d.confidence >= 0.2)
+    : [];
+  const spread =
+    scored.length >= 2
+      ? Math.max(...scored.map((d) => d.score)) - Math.min(...scored.map((d) => d.score))
+      : 0;
+
+  let statusLabel: string;
+  let statusTone: "good" | "watch" | "alert";
+  if (!obs) {
+    statusLabel = "尚无评级";
+    statusTone = "watch";
+  } else if (spread >= 0.55 && weakestScore < 0.3) {
+    statusLabel = "偏科明显";
+    statusTone = "watch";
+  } else if (composite >= 0.75) {
+    statusLabel = "状态优异";
+    statusTone = "good";
+  } else if (composite >= 0.55) {
+    statusLabel = "稳步推进";
+    statusTone = "good";
+  } else if (verdict === "further" || composite < 0.32) {
+    statusLabel = "效率下滑";
+    statusTone = "alert";
+  } else {
+    statusLabel = "轻度懈怠";
+    statusTone = "watch";
+  }
+
+  const verdictText = { closer: "更接近", neutral: "持平于", further: "更远离" }[verdict];
+  const weakClause = weakestDim ? ` · 最弱「${weakestLabel}」` : "";
+  const headline = obs
+    ? `本期 ${grade} 级 · ${statusLabel}${weakClause} · 行为正${verdictText}理想人生`
+    : "尚无评级，日终校准后自动生成";
+
+  return {
+    grade,
+    composite,
+    statusLabel,
+    statusTone,
+    verdict,
+    weakestDim,
+    weakestLabel,
+    headline,
+    factors: { netGrowth: ng, discipline, streak, credibility },
+  };
+}
+
 // ── Decision Agent §8 / §9 ─────────────────────────────────────────
 
 /** 今日净成长值：今天的行为对理想人生的净影响（-100..100）*/

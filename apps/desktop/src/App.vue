@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import type { AttributeKey, Bounty, BountyCategory, FeatureKey, GoalLevel, NexusEvent, ProfileChangeProposal, Review, Task, TaskStatus, TaskStatusUpdateEvidence, UserStreak } from "@nexus/shared";
-import { ATTRIBUTE_LABELS, BOUNTY_CATEGORY_LABELS, BOUNTY_STATE_LABELS, DIVERGENCE_STATUS_LABELS, NET_GROWTH_VERDICT_LABELS, PERIOD_TREND_LABELS, STREAK_LABELS, UNLOCK_LABELS, UNLOCK_LEVELS, isFeatureUnlocked, xpToNextLevel } from "@nexus/shared";
+import type { AttributeKey, Bounty, BountyCategory, FeatureKey, GoalLevel, NetGrowthVerdict, NexusEvent, ProfileChangeProposal, ProfileChangeStatus, Review, Task, TaskStatus, TaskStatusUpdateEvidence, UserStreak } from "@nexus/shared";
+import { ATTRIBUTE_LABELS, BOUNTY_CATEGORY_LABELS, BOUNTY_STATE_LABELS, DIVERGENCE_STATUS_LABELS, MBTI_AXIS_KEYS, NET_GROWTH_VERDICT_LABELS, OBSERVED_DIM_KEYS, OBSERVED_DIM_LABELS, PERIOD_TREND_LABELS, STREAK_LABELS, UNLOCK_LABELS, UNLOCK_LEVELS, assessProfileGrade, isFeatureUnlocked, profileFieldRiskTier, xpToNextLevel } from "@nexus/shared";
 import {
   Activity,
   AlertTriangle,
@@ -50,6 +50,12 @@ import {
   RefreshCw,
   Route,
   Scale,
+  Shield,
+  Fingerprint,
+  Radar,
+  History,
+  RotateCcw,
+  ChevronDown,
   ScrollText,
   Split,
   Timer,
@@ -263,19 +269,48 @@ const dismissedBounties = computed(() =>
 
 const showProfileForm = ref(false);
 const profileDraft = reactive({
+  name: "",
   codename: "",
   focus: "",
   vision: "",
   redLines: "",
+  mbtiEI: "",
+  mbtiSN: "",
+  mbtiTF: "",
+  mbtiJP: "",
 });
+
+// MBTI 四轴（声明层「人格基线 · 自评」，§7.1）
+const MBTI_AXES = [
+  { key: "mbtiEI", a: "E", b: "I", la: "外向", lb: "内向" },
+  { key: "mbtiSN", a: "S", b: "N", la: "实感", lb: "直觉" },
+  { key: "mbtiTF", a: "T", b: "F", la: "思考", lb: "情感" },
+  { key: "mbtiJP", a: "J", b: "P", la: "判断", lb: "感知" },
+] as const;
+type MbtiAxisKey = (typeof MBTI_AXES)[number]["key"];
+function setMbtiAxis(key: MbtiAxisKey, val: string) {
+  profileDraft[key] = profileDraft[key] === val ? "" : val;
+}
 
 function openProfileForm() {
   const p = store.profile;
+  profileDraft.name = String(p?.basicInfo?.name ?? "");
   profileDraft.codename = String(p?.basicInfo?.codename ?? "");
   profileDraft.focus = String(p?.basicInfo?.focus ?? "");
   profileDraft.vision = String(p?.longTermVision?.statement ?? "");
   profileDraft.redLines = Array.isArray(p?.redLines) ? p.redLines.join("\n") : "";
+  const mbti = ((p?.traits as Record<string, unknown> | undefined)?.mbti as { type?: unknown } | undefined)?.type;
+  const t = typeof mbti === "string" ? mbti.toUpperCase() : "";
+  profileDraft.mbtiEI = t[0] === "E" || t[0] === "I" ? t[0] : "";
+  profileDraft.mbtiSN = t[1] === "S" || t[1] === "N" ? t[1] : "";
+  profileDraft.mbtiTF = t[2] === "T" || t[2] === "F" ? t[2] : "";
+  profileDraft.mbtiJP = t[3] === "J" || t[3] === "P" ? t[3] : "";
   showProfileForm.value = true;
+}
+
+function toggleProfileForm() {
+  if (showProfileForm.value) showProfileForm.value = false;
+  else openProfileForm();
 }
 
 async function saveProfile() {
@@ -283,11 +318,21 @@ async function saveProfile() {
     .split("\n")
     .map((s) => s.trim())
     .filter(Boolean);
+  const mbtiType =
+    profileDraft.mbtiEI && profileDraft.mbtiSN && profileDraft.mbtiTF && profileDraft.mbtiJP
+      ? profileDraft.mbtiEI + profileDraft.mbtiSN + profileDraft.mbtiTF + profileDraft.mbtiJP
+      : "";
   await store.updateProfile({
     basicInfo: {
       ...(store.profile?.basicInfo ?? {}),
+      name: profileDraft.name.trim(),
       codename: profileDraft.codename.trim() || "宿主",
       focus: profileDraft.focus.trim(),
+    },
+    traits: {
+      ...(store.profile?.traits ?? {}),
+      // 自评基线：仅四轴齐全才写入；行为校准（观测层）是 P3 范畴，互不覆盖
+      ...(mbtiType ? { mbti: { type: mbtiType, source: "self", setAt: new Date().toISOString() } } : {}),
     },
     longTermVision: {
       ...(store.profile?.longTermVision ?? {}),
@@ -297,6 +342,157 @@ async function saveProfile() {
   });
   if (!store.error) showProfileForm.value = false;
 }
+
+// ── 宿主档案：只读视图派生数据（避免把信息藏在编辑表单里） ──────────
+const profileCodename = computed(() => String(store.profile?.basicInfo?.codename ?? "宿主"));
+const profileName = computed(() => String(store.profile?.basicInfo?.name ?? "").trim());
+const profileDisplayName = computed(() => profileName.value || profileCodename.value);
+const profileMbti = computed(() => {
+  const m = (store.profile?.traits as Record<string, unknown> | undefined)?.mbti as { type?: unknown } | undefined;
+  return typeof m?.type === "string" ? m.type.toUpperCase() : "";
+});
+const profileInitial = computed(() => {
+  const c = profileDisplayName.value.trim();
+  return c ? c[0]!.toUpperCase() : "?";
+});
+const profileFocus = computed(() => String(store.profile?.basicInfo?.focus ?? "").trim());
+const profileVision = computed(() => String(store.profile?.longTermVision?.statement ?? "").trim());
+const profileRedLines = computed<string[]>(() =>
+  Array.isArray(store.profile?.redLines) ? store.profile!.redLines.filter((s) => s.trim()) : [],
+);
+const profilePersona = computed(() => {
+  const t = (store.profile?.traits ?? {}) as Record<string, unknown>;
+  return typeof t.personaSummary === "string" ? t.personaSummary : "";
+});
+const profileSyncedAt = computed(() => {
+  const iso = store.profile?.updatedAt;
+  if (!iso) return "——";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "——";
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}.${p(d.getMonth() + 1)}.${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+});
+
+// ── 观测层 · 活体画像（规划书 §6/§9，P2/P3/P4）──────────────────────
+const showObserved = ref(false);
+const obs = computed(() => store.observation);
+
+const obsDims = computed(() =>
+  OBSERVED_DIM_KEYS.map((k) => {
+    const d = obs.value?.dimensions?.[k];
+    return {
+      key: k,
+      label: OBSERVED_DIM_LABELS[k],
+      score: d?.score ?? 0,
+      confidence: d?.confidence ?? 0,
+      note: d?.note ?? "",
+    };
+  }),
+);
+
+// 六维雷达几何（viewBox 0 0 180 180，中心 90，半径 64）
+const RADAR_C = 90;
+const RADAR_R = 64;
+function radarPoint(frac: number, i: number, n: number): [number, number] {
+  const ang = ((-90 + (360 / n) * i) * Math.PI) / 180;
+  return [RADAR_C + RADAR_R * frac * Math.cos(ang), RADAR_C + RADAR_R * frac * Math.sin(ang)];
+}
+const radar = computed(() => {
+  const dims = obsDims.value;
+  const n = dims.length;
+  const polygon = dims.map((d, i) => radarPoint(Math.max(0.03, d.score), i, n).join(",")).join(" ");
+  const axes = dims.map((d, i) => {
+    const [x, y] = radarPoint(1, i, n);
+    const [lx, ly] = radarPoint(1.24, i, n);
+    return { x, y, lx, ly, label: d.label, key: d.key };
+  });
+  const rings = [0.25, 0.5, 0.75, 1].map((r) =>
+    dims.map((_, i) => radarPoint(r, i, n).join(",")).join(" "),
+  );
+  return { polygon, axes, rings };
+});
+
+const MBTI_POLES: Record<string, [string, string]> = {
+  EI: ["E", "I"],
+  SN: ["S", "N"],
+  TF: ["T", "F"],
+  JP: ["J", "P"],
+};
+const MBTI_AXIS_NAMES: Record<string, string> = {
+  EI: "能量来源",
+  SN: "信息获取",
+  TF: "决策方式",
+  JP: "生活态度",
+};
+const mbtiRows = computed(() =>
+  MBTI_AXIS_KEYS.map((k) => {
+    const ev = obs.value?.mbtiEvidence?.[k];
+    const [a, b] = MBTI_POLES[k]!;
+    const lean = ev?.lean ?? "";
+    const score = ev?.score ?? 0;
+    const pos = lean === a ? 50 - score * 50 : lean === b ? 50 + score * 50 : 50;
+    return {
+      key: k,
+      a,
+      b,
+      axisName: MBTI_AXIS_NAMES[k],
+      lean,
+      confidence: ev?.confidence ?? 0,
+      pos,
+    };
+  }),
+);
+
+const NET_GROWTH_VERDICT_UI: Record<NetGrowthVerdict, { label: string; cls: string }> = {
+  closer: { label: "更接近理想人生", cls: "closer" },
+  neutral: { label: "持平", cls: "neutral" },
+  further: { label: "更远离理想人生", cls: "further" },
+};
+const obsVerdict = computed(() => NET_GROWTH_VERDICT_UI[obs.value?.netGrowthVerdict ?? "neutral"]);
+
+// ── 顶部 hero 偏差带：周期评级 + 状态标签 + 最弱项（对齐导向）──────────
+const heroLongestStreak = computed(() =>
+  store.streaks.reduce((m, s) => Math.max(m, s.currentStreak ?? 0), 0),
+);
+const hero = computed(() =>
+  assessProfileGrade({
+    observation: store.observation,
+    credibility: store.user?.credibilityScore,
+    longestStreak: heroLongestStreak.value,
+  }),
+);
+
+// 自律分趋势火花线（时间线倒序 → 正序）
+const disciplineTrend = computed(() => {
+  const series = [...store.observationTrend]
+    .reverse()
+    .map((o) => o.dimensions?.discipline?.score ?? 0);
+  if (series.length < 2) return "";
+  const w = 120;
+  const h = 26;
+  return series.map((v, i) => `${(i / (series.length - 1)) * w},${(h - v * h).toFixed(1)}`).join(" ");
+});
+
+// 演化提议风险分级（规划书 §8.1）
+const RISK_UI: Record<string, { label: string; cls: string }> = {
+  high: { label: "高风险 · 必裁决", cls: "high" },
+  medium: { label: "中风险", cls: "medium" },
+  low: { label: "低风险", cls: "low" },
+};
+function proposalRisk(p: ProfileChangeProposal) {
+  return RISK_UI[profileFieldRiskTier(p.field, p.subPath)]!;
+}
+
+// 演化时间线（已裁决 / 已回滚的历史，可回滚已接受项）
+const evolutionHistory = computed(() =>
+  store.profileChangeHistory.filter((p) => p.status !== "pending"),
+);
+const PROFILE_STATUS_UI: Record<ProfileChangeStatus, { label: string; cls: string }> = {
+  accepted: { label: "已接受", cls: "accepted" },
+  rejected: { label: "已拒绝", cls: "rejected" },
+  rolled_back: { label: "已回滚", cls: "rolled" },
+  pending: { label: "待裁决", cls: "pending" },
+};
 
 const taskRows = computed(() =>
   store.tasks.map((task) => ({
@@ -1150,6 +1346,7 @@ function setMainView(v: MainView) {
 watch(mainView, (k) => {
   if (k === "data") loadDay();
   if (k === "persona") seedPersona();
+  if (k === "profile") void store.loadProfilePanel();
   if (k === "shop" && unlocked("shop")) {
     void store.loadBounties();
     void store.loadShop();
@@ -1426,42 +1623,267 @@ const overviewInsight = computed(() => {
       <div class="module-page-body">
 
     <template v-if="mainView === 'profile'">
-    <section class="profile-section">
-      <div class="profile-header">
-        <User :size="16" />
-        <h2>宿主档案</h2>
-        <span class="profile-summary">
-          {{ store.profile?.basicInfo?.codename ?? "宿主" }}
-          <template v-if="store.profile?.basicInfo?.focus">
-            · {{ store.profile.basicInfo.focus }}
-          </template>
-        </span>
-        <button class="icon-button" title="编辑档案" type="button" @click="openProfileForm">
-          <Edit3 :size="16" />
-        </button>
+    <section class="dossier">
+      <span class="dossier-corner tl" aria-hidden="true" />
+      <span class="dossier-corner tr" aria-hidden="true" />
+      <span class="dossier-corner bl" aria-hidden="true" />
+      <span class="dossier-corner br" aria-hidden="true" />
+
+      <!-- 身份核心卡 -->
+      <header class="dossier-id">
+        <div class="dossier-sigil">
+          <span class="dossier-sigil-char">{{ profileInitial }}</span>
+          <Fingerprint class="dossier-sigil-mark" :size="13" />
+        </div>
+        <div class="dossier-id-main">
+          <span class="dossier-eyebrow">HOST DOSSIER · 宿主档案</span>
+          <h2 class="dossier-codename">{{ profileDisplayName }}</h2>
+          <p class="dossier-status">
+            <span class="dossier-pulse" aria-hidden="true" />
+            <span>档案在线</span>
+            <span v-if="profileName" class="dossier-callsign">· @{{ profileCodename }}</span>
+            <span class="dossier-mbti" :class="{ unset: !profileMbti }">
+              <Brain :size="11" />
+              {{ profileMbti || "MBTI 待评" }}<em v-if="profileMbti"> · 自评</em>
+            </span>
+          </p>
+        </div>
+        <div class="dossier-meta">
+          <span class="dossier-tag lvl"><Zap :size="12" /> Lv.{{ levelInfo.level }}</span>
+          <span class="dossier-tag">REV {{ String(store.profile?.version ?? 1).padStart(2, "0") }}</span>
+          <span class="dossier-tag dim">SYNC {{ profileSyncedAt }}</span>
+          <button
+            class="dossier-edit"
+            :class="{ active: showProfileForm }"
+            :title="showProfileForm ? '退出编辑' : '编辑档案'"
+            type="button"
+            @click="toggleProfileForm"
+          >
+            <X v-if="showProfileForm" :size="15" />
+            <Edit3 v-else :size="15" />
+          </button>
+        </div>
+      </header>
+
+      <!-- 顶部 hero 偏差带：一眼看懂「方向对不对、哪里在漂、要不要校准」 -->
+      <div class="dossier-hero" :class="hero.statusTone">
+        <div class="hero-grade">{{ hero.grade }}</div>
+        <div class="hero-main">
+          <div class="hero-top">
+            <span class="hero-status">{{ hero.statusLabel }}</span>
+            <span class="hero-verdict" :class="NET_GROWTH_VERDICT_UI[hero.verdict].cls">
+              {{ NET_GROWTH_VERDICT_UI[hero.verdict].label }}
+            </span>
+            <span v-if="obs" class="hero-period">近 {{ obs.windowDays }} 天</span>
+          </div>
+          <p class="hero-headline">{{ hero.headline }}</p>
+          <div class="hero-factors">
+            <div class="hero-factor primary">
+              <span class="hf-label">净增长</span>
+              <span class="hf-track"><i :style="{ width: Math.round(hero.factors.netGrowth * 100) + '%' }" /></span>
+            </div>
+            <div class="hero-factor">
+              <span class="hf-label">自律</span>
+              <span class="hf-track"><i :style="{ width: Math.round(hero.factors.discipline * 100) + '%' }" /></span>
+            </div>
+            <div class="hero-factor">
+              <span class="hf-label">连续</span>
+              <span class="hf-track"><i :style="{ width: Math.round(hero.factors.streak * 100) + '%' }" /></span>
+            </div>
+            <div class="hero-factor">
+              <span class="hf-label">可信</span>
+              <span class="hf-track"><i :style="{ width: Math.round(hero.factors.credibility * 100) + '%' }" /></span>
+            </div>
+          </div>
+        </div>
       </div>
-      <form v-if="showProfileForm" class="profile-form" @submit.prevent="saveProfile">
-        <label>
-          <span>代号/称呼</span>
+
+      <!-- 只读视图：把档案当成数据读出来，而不是藏进表单 -->
+      <div v-if="!showProfileForm" class="dossier-body">
+        <article class="dfield vision">
+          <div class="dfield-tag"><Sun :size="13" /> 长期愿景 <em>VISION VECTOR</em></div>
+          <p v-if="profileVision" class="dfield-vision-text">{{ profileVision }}</p>
+          <p v-else class="dfield-empty">
+            尚未锚定长期愿景。这是日终校准时净增长的标尺——今天比昨天更近，还是更远。
+          </p>
+        </article>
+
+        <div class="dossier-grid">
+          <article class="dfield">
+            <div class="dfield-tag"><Target :size="13" /> 当前专注 <em>DIRECTIVE</em></div>
+            <p v-if="profileFocus" class="dfield-text">{{ profileFocus }}</p>
+            <p v-else class="dfield-empty">未设定当前专注。</p>
+          </article>
+          <article class="dfield">
+            <div class="dfield-tag"><Dna :size="13" /> 行为画像 <em>BEHAVIOR PROFILE</em></div>
+            <p v-if="profilePersona" class="dfield-text">{{ profilePersona }}</p>
+            <p v-else class="dfield-empty">尚未完成性格测评。前往「性格」模块，1 分钟生成画像。</p>
+          </article>
+        </div>
+
+        <article class="dfield redlines">
+          <div class="dfield-tag">
+            <Shield :size="13" /> 红线协议 <em>HARD CONSTRAINTS</em>
+            <span class="dfield-count">{{ profileRedLines.length }}</span>
+          </div>
+          <ul v-if="profileRedLines.length" class="redline-list">
+            <li v-for="(line, i) in profileRedLines" :key="i" class="redline-item">
+              <span class="redline-idx">{{ String(i + 1).padStart(2, "0") }}</span>
+              <span class="redline-text">{{ line }}</span>
+            </li>
+          </ul>
+          <p v-else class="dfield-empty">
+            尚未设定红线。红线是系统在日终校准时对照你实际行为的底线——例如「不冲动消费」「不逃避复盘」。
+          </p>
+        </article>
+      </div>
+
+      <!-- 编辑模式：结构沿用，绑定与保存逻辑保持不变 -->
+      <form v-else class="dossier-form" @submit.prevent="saveProfile">
+        <label class="dform-row">
+          <span class="dform-label"><User :size="13" /> 姓名 <em>NAME · 可空</em></span>
+          <input v-model="profileDraft.name" placeholder="用于更自然的人称化称呼，可留空" />
+        </label>
+        <label class="dform-row">
+          <span class="dform-label"><Fingerprint :size="13" /> 代号 / 称呼 <em>CALL SIGN</em></span>
           <input v-model="profileDraft.codename" placeholder="例：caoqi" />
         </label>
-        <label>
-          <span>当前专注</span>
+        <div class="dform-row">
+          <span class="dform-label"><Brain :size="13" /> 人格基线 <em>MBTI · 自评，可随时校准</em></span>
+          <div class="mbti-axes">
+            <div v-for="ax in MBTI_AXES" :key="ax.key" class="mbti-axis">
+              <button
+                type="button"
+                :class="['mbti-pole', { active: profileDraft[ax.key] === ax.a }]"
+                @click="setMbtiAxis(ax.key, ax.a)"
+              >
+                <b>{{ ax.a }}</b><span>{{ ax.la }}</span>
+              </button>
+              <button
+                type="button"
+                :class="['mbti-pole', { active: profileDraft[ax.key] === ax.b }]"
+                @click="setMbtiAxis(ax.key, ax.b)"
+              >
+                <b>{{ ax.b }}</b><span>{{ ax.lb }}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+        <label class="dform-row">
+          <span class="dform-label"><Target :size="13" /> 当前专注 <em>DIRECTIVE</em></span>
           <input v-model="profileDraft.focus" placeholder="例：完成 NEXUS-7 Phase 0，建立每日复盘习惯" />
         </label>
-        <label>
-          <span>长期愿景</span>
-          <textarea v-model="profileDraft.vision" placeholder="例：成为能够自主生活、持续进化、深度创作的个体" />
+        <label class="dform-row">
+          <span class="dform-label"><Sun :size="13" /> 长期愿景 <em>VISION VECTOR</em></span>
+          <textarea v-model="profileDraft.vision" rows="2" placeholder="例：成为能够自主生活、持续进化、深度创作的个体" />
         </label>
-        <label>
-          <span>红线（每行一条）</span>
-          <textarea v-model="profileDraft.redLines" placeholder="例：不要把任务系统退化成机械打卡&#10;不逃避复盘" />
+        <label class="dform-row">
+          <span class="dform-label"><Shield :size="13" /> 红线 <em>每行一条</em></span>
+          <textarea v-model="profileDraft.redLines" rows="3" placeholder="例：不要把任务系统退化成机械打卡&#10;不逃避复盘" />
         </label>
-        <div class="profile-form-actions">
-          <button type="submit" :disabled="store.loading">保存</button>
-          <button type="button" @click="showProfileForm = false">取消</button>
+        <div class="dossier-form-actions">
+          <button type="button" class="ghost" @click="showProfileForm = false">取消</button>
+          <button type="submit" class="primary" :disabled="store.loading"><Check :size="14" /> 保存档案</button>
         </div>
       </form>
+
+      <!-- 观测层 · 活体画像（规划书 §6/§9：分层展示，默认折叠可展开）-->
+      <div class="observed-block">
+        <button class="observed-head" type="button" @click="showObserved = !showObserved">
+          <Radar :size="14" />
+          <span class="observed-title">NEXUS 侧写 · 活体画像</span>
+          <span v-if="obs" class="observed-verdict" :class="obsVerdict.cls">{{ obsVerdict.label }}</span>
+          <span v-if="obs" class="observed-window">{{ obs.windowDays }}天窗</span>
+          <ChevronDown :size="16" class="observed-chevron" :class="{ open: showObserved }" />
+        </button>
+
+        <p v-if="!obs" class="observed-empty">
+          暂无画像快照。日终校准会自动生成；或点「立即分析」做一次深度侧写。
+          <button class="observed-scan" type="button" :disabled="store.observationLoading" @click="store.runProfileObservation()">
+            <RefreshCw :size="12" /> {{ store.observationLoading ? "分析中…" : "立即分析" }}
+          </button>
+        </p>
+
+        <div v-else-if="showObserved" class="observed-body">
+          <div class="observed-bar">
+            <span class="observed-summary">{{ obs.summary }}</span>
+            <button class="observed-scan" type="button" :disabled="store.observationLoading" @click="store.runProfileObservation()">
+              <RefreshCw :size="12" /> {{ store.observationLoading ? "分析中…" : "立即分析" }}
+            </button>
+          </div>
+
+          <div class="observed-grid">
+            <div class="radar-wrap">
+              <svg class="radar" viewBox="0 0 180 180" role="img" aria-label="六维行为画像雷达">
+                <polygon v-for="(ring, i) in radar.rings" :key="'ring' + i" :points="ring" class="radar-ring" />
+                <line
+                  v-for="ax in radar.axes"
+                  :key="'axis' + ax.key"
+                  :x1="RADAR_C"
+                  :y1="RADAR_C"
+                  :x2="ax.x"
+                  :y2="ax.y"
+                  class="radar-axis"
+                />
+                <polygon :points="radar.polygon" class="radar-shape" />
+                <text
+                  v-for="ax in radar.axes"
+                  :key="'lbl' + ax.key"
+                  :x="ax.lx"
+                  :y="ax.ly"
+                  class="radar-label"
+                  text-anchor="middle"
+                  dominant-baseline="middle"
+                >
+                  {{ ax.label }}
+                </text>
+              </svg>
+            </div>
+
+            <ul class="dim-list">
+              <li v-for="d in obsDims" :key="d.key" class="dim-row">
+                <span class="dim-name">{{ d.label }}</span>
+                <div class="dim-track"><div class="dim-fill" :style="{ width: Math.round(d.score * 100) + '%' }" /></div>
+                <span class="dim-note" :class="{ faint: d.confidence < 0.3 }">
+                  {{ d.confidence < 0.3 ? "证据不足" : d.note }}
+                </span>
+              </li>
+            </ul>
+          </div>
+
+          <div class="mbti-evidence">
+            <div class="mbti-evidence-head">
+              <Brain :size="12" /> MBTI 行为证据 <em>与自评并行 · 互不覆盖</em>
+            </div>
+            <div v-for="row in mbtiRows" :key="row.key" class="mbti-ev-row">
+              <span class="mbti-ev-axis">{{ row.axisName }}</span>
+              <span class="mbti-ev-pole" :class="{ active: row.lean === row.a }">{{ row.a }}</span>
+              <div class="mbti-ev-track">
+                <span class="mbti-ev-dot" :class="{ faint: row.confidence < 0.3 }" :style="{ left: row.pos + '%' }" />
+              </div>
+              <span class="mbti-ev-pole" :class="{ active: row.lean === row.b }">{{ row.b }}</span>
+              <span class="mbti-ev-meta">{{ row.confidence < 0.3 ? "观察中" : Math.round(row.confidence * 100) + "%" }}</span>
+            </div>
+          </div>
+
+          <div class="observed-foot">
+            <div v-if="obs.redLineFit.length" class="redfit">
+              <span
+                v-for="rf in obs.redLineFit"
+                :key="rf.line"
+                class="redfit-chip"
+                :class="{ breach: rf.breaches > 0 }"
+              >
+                <Shield :size="11" /> {{ rf.line }} · {{ rf.breaches > 0 ? rf.breaches + " 次触碰" : "契合" }}
+              </span>
+            </div>
+            <div v-if="disciplineTrend" class="trend-spark">
+              <span class="trend-label">自律趋势</span>
+              <svg class="spark" viewBox="0 0 120 26"><polyline :points="disciplineTrend" /></svg>
+            </div>
+          </div>
+        </div>
+      </div>
 
       <!-- 档案演化提议（§5.3）：系统提议、宿主裁决 -->
       <div class="evolution-block">
@@ -1484,6 +1906,7 @@ const overviewInsight = computed(() => {
         <article v-for="p in store.profileChanges" :key="p.id" class="evolution-card">
           <div class="evolution-card-head">
             <span class="evolution-field">{{ proposalFieldLabel(p) }}</span>
+            <span class="evolution-risk" :class="proposalRisk(p).cls">{{ proposalRisk(p).label }}</span>
             <span class="evolution-confidence">置信 {{ Math.round(p.confidence * 100) }}%</span>
           </div>
           <div class="evolution-diff">
@@ -1500,6 +1923,31 @@ const overviewInsight = computed(() => {
               <X :size="13" /> 拒绝
             </button>
           </div>
+        </article>
+      </div>
+
+      <!-- 演化时间线（规划书 §8.3：已裁决可回滚，数据主权）-->
+      <div v-if="evolutionHistory.length" class="evolution-timeline">
+        <div class="evolution-head">
+          <History :size="14" />
+          <span>演化时间线</span>
+        </div>
+        <article v-for="h in evolutionHistory" :key="h.id" class="timeline-row">
+          <span class="timeline-status" :class="PROFILE_STATUS_UI[h.status].cls">
+            {{ PROFILE_STATUS_UI[h.status].label }}
+          </span>
+          <span class="timeline-field">{{ proposalFieldLabel(h) }}</span>
+          <span class="timeline-reason">{{ h.reason }}</span>
+          <button
+            v-if="h.status === 'accepted'"
+            class="timeline-rollback"
+            type="button"
+            :disabled="store.loading"
+            title="还原到提议前"
+            @click="store.rollbackProfileChange(h.id)"
+          >
+            <RotateCcw :size="12" /> 回滚
+          </button>
         </article>
       </div>
     </section>

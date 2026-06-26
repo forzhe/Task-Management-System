@@ -197,6 +197,16 @@ export class AppController {
     return this.nexus.runProfileEvolution(body?.deep ?? false);
   }
 
+  @Get("profile/observation")
+  getProfileObservation() {
+    return this.nexus.getProfileObservation();
+  }
+
+  @Post("profile/observation/scan")
+  runProfileObservation(@Body() body: { deep?: boolean }) {
+    return this.nexus.runProfileObservation(body?.deep ?? true);
+  }
+
   @Get("profile/changes")
   listProfileChanges(@Query("status") status?: "pending" | "accepted" | "rejected" | "rolled_back") {
     return this.nexus.listProfileChanges(status);
@@ -205,6 +215,11 @@ export class AppController {
   @Post("profile/changes/:id/resolve")
   resolveProfileChange(@Param("id") id: string, @Body() body: { accept: boolean }) {
     return this.nexus.resolveProfileChange(id, body.accept);
+  }
+
+  @Post("profile/changes/:id/rollback")
+  rollbackProfileChange(@Param("id") id: string) {
+    return this.nexus.rollbackProfileChange(id);
   }
 
   @Get("decision/net-growth")

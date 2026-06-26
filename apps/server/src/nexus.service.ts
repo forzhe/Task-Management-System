@@ -35,6 +35,7 @@ import type {
   PeriodReport,
   PeriodStats,
   Profile,
+  ProfileObservation,
   ProfileUpdateInput,
   RelationshipGraph,
   ReviewType,
@@ -1165,8 +1166,49 @@ export class NexusService implements OnModuleDestroy {
     return result;
   }
 
+  /** 宿主档案 · 观测层刷新（规划书 §6）。deep=true 为手动深扫（28 天窗 + MBTI 漂移检测）*/
+  async runProfileObservation(deep = false) {
+    const result = await this.orchestrator.runProfileObservation(deep);
+    await this.syncVault();
+    return result;
+  }
+
+  /** 取最新画像快照 + 时间线（倒序，最新在前）*/
+  getProfileObservation(): { latest: ProfileObservation | null; trend: ProfileObservation[] } {
+    const events = this.repository.queryEventsByCategory("profile_observation", 60);
+    const trend = events
+      .map((e) => e.structured.observation as ProfileObservation | undefined)
+      .filter((o): o is ProfileObservation => Boolean(o && typeof o === "object"));
+    return { latest: trend[0] ?? null, trend };
+  }
+
   listProfileChanges(status?: "pending" | "accepted" | "rejected" | "rolled_back") {
     return this.repository.listProfileChangeProposals(status);
+  }
+
+  /** 回滚一条已接受的演化提议（数据主权 §8.3）*/
+  rollbackProfileChange(proposalId: string) {
+    const result = this.repository.rollbackProfileChange(proposalId);
+    if (result.profile) {
+      this.repository.logEvent({
+        source: "profile-api",
+        type: "decision",
+        category: "profile_change_resolved",
+        rawPayload: { proposalId, rollback: true },
+        structured: {
+          summary: `档案提议已回滚：${result.proposal.field}`,
+          proposalId,
+          rolledBack: true,
+          field: result.proposal.field,
+        },
+        occurredAt: new Date().toISOString(),
+        confidence: 1,
+        tags: ["profile", "rolled_back"],
+        relatedGoalIds: [],
+        relatedTaskIds: [],
+      });
+    }
+    return result;
   }
 
   resolveProfileChange(proposalId: string, accept: boolean) {
@@ -1369,6 +1411,12 @@ export class NexusService implements OnModuleDestroy {
       await this.orchestrator.runNetGrowth();
     } catch (err) {
       console.error("net growth refresh failed:", err);
+    }
+    // 日终顺带刷新观测层画像快照（规划书 §6.1，失败不阻塞复盘）
+    try {
+      await this.orchestrator.runProfileObservation(false);
+    } catch (err) {
+      console.error("profile observation refresh failed:", err);
     }
     await this.syncVault();
     return result;

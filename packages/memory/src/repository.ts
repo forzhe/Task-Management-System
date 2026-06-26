@@ -336,17 +336,44 @@ export class NexusRepository {
   }
 
   private applyProfileChange(proposal: ProfileChangeProposal): Profile {
+    return this.writeProfileField(proposal, proposal.proposedValue);
+  }
+
+  /**
+   * 回滚一条已接受的演化提议：把字段还原到提议前的 currentValue（数据主权 §8.3）。
+   * 仅 status==="accepted" 可回滚；其余原样返回。
+   */
+  rollbackProfileChange(
+    proposalId: string,
+  ): { proposal: ProfileChangeProposal; profile: Profile | null } {
+    const row = this.db
+      .prepare("select * from profile_change_log where id = ? and user_id = ?")
+      .get(proposalId, this.userId) as Record<string, unknown> | undefined;
+    if (!row) throw new Error(`Profile change ${proposalId} not found`);
+    const proposal = this.mapProfileChange(row);
+    if (proposal.status !== "accepted") {
+      return { proposal, profile: null };
+    }
+    const profile = this.writeProfileField(proposal, proposal.currentValue);
+    const resolvedAt = now();
+    this.db
+      .prepare("update profile_change_log set status = 'rolled_back', resolved_at = ? where id = ?")
+      .run(resolvedAt, proposalId);
+    return { proposal: { ...proposal, status: "rolled_back", resolvedAt }, profile };
+  }
+
+  private writeProfileField(proposal: ProfileChangeProposal, value: unknown): Profile {
     const current = this.getProfile();
     const delta: Partial<Omit<Profile, "userId" | "updatedAt" | "version">> = {};
     if (proposal.field === "redLines") {
-      delta.redLines = proposal.proposedValue as string[];
+      delta.redLines = value as string[];
     } else if (proposal.subPath) {
       // 子键替换：合并进现有对象字段
       const base = { ...(current[proposal.field] as Record<string, unknown>) };
-      base[proposal.subPath] = proposal.proposedValue;
+      base[proposal.subPath] = value;
       delta[proposal.field] = base as never;
     } else {
-      delta[proposal.field] = proposal.proposedValue as never;
+      delta[proposal.field] = value as never;
     }
     return this.updateProfile(delta);
   }
@@ -1167,6 +1194,16 @@ export class NexusRepository {
     const rows = this.db
       .prepare("select * from events where user_id = ? order by occurred_at desc limit ?")
       .all(this.userId, limit) as Record<string, unknown>[];
+    return rows.map((row) => this.mapEvent(row));
+  }
+
+  /** 取某类目的事件（按时间倒序）。用于观测层画像时间线（profile_observation）等。*/
+  queryEventsByCategory(category: string, limit = 60): NexusEvent[] {
+    const rows = this.db
+      .prepare(
+        "select * from events where user_id = ? and category = ? order by occurred_at desc limit ?",
+      )
+      .all(this.userId, category, limit) as Record<string, unknown>[];
     return rows.map((row) => this.mapEvent(row));
   }
 
