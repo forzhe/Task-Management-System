@@ -40,6 +40,7 @@ export const useNexusStore = defineStore("nexus", {
     goals: [] as Goal[],
     tasks: [] as Task[],
     events: [] as NexusEvent[],
+    growthEvents: [] as NexusEvent[],
     latestReview: null as Review | null,
     companion: null as Companion | null,
     chat: [] as ChatLine[],
@@ -307,6 +308,13 @@ export const useNexusStore = defineStore("nexus", {
     async loadShop() {
       try {
         this.shop = await api.shop();
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    },
+    async loadGrowthHistory() {
+      try {
+        this.growthEvents = await api.growthHistory();
       } catch (error) {
         this.error = error instanceof Error ? error.message : String(error);
       }

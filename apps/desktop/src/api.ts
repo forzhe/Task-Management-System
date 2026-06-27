@@ -113,6 +113,7 @@ export const api = {
   goals: () => request<Goal[]>("/goals"),
   tasks: () => request<Task[]>("/tasks"),
   events: () => request<NexusEvent[]>("/events/query?limit=12"),
+  growthHistory: (limit = 400) => request<NexusEvent[]>(`/events/query?limit=${limit}`),
   latestReview: () => request<Review | null>("/reviews/latest?type=daily"),
   companion: () => request<Companion>("/companion/state"),
   sendChat: (message: string) =>

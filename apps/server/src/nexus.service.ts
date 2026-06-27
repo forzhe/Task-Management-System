@@ -16,6 +16,10 @@ import {
 } from "@nexus/ai-core";
 import { NexusRepository } from "@nexus/memory";
 import type {
+  AttributeKey,
+  GrowthLedgerEntry,
+  GrowthLedgerReason,
+  User,
   BountyActionResult,
   BountyPriceBreakdown,
   BountyProposeResult,
@@ -49,9 +53,12 @@ import type {
   TriggerKind,
 } from "@nexus/shared";
 import {
+  ATTRIBUTE_KEYS,
   ATTRIBUTE_LABELS,
   BOUNTY_MIN_CREDIBILITY,
   DIVERGENCE_CREDIBILITY_DELTA,
+  GROWTH_LEDGER_CATEGORY,
+  GROWTH_REASON_LABELS,
   SHOP_CATALOG,
   isEvolutionTargetAllowed,
 } from "@nexus/shared";
@@ -269,7 +276,9 @@ export class NexusService implements OnModuleDestroy {
     );
     // Award exp/points when task completed; adjust credibility for completing with evidence
     if (status === "completed") {
-      this.repository.applyTaskRewards(taskId);
+      const userBefore = this.repository.getUser();
+      const userAfter = this.repository.applyTaskRewards(taskId);
+      this.logGrowthLedger(userBefore, userAfter, "task", task.title);
       if (evidence?.note && evidence.note.trim().length >= 10) {
         this.repository.adjustCredibility(0.02);
       }
@@ -292,7 +301,9 @@ export class NexusService implements OnModuleDestroy {
     const task = this.repository.addTaskFocusMinutes(taskId, m);
     if (!task) return { ok: false as const, error: "任务不存在" };
     const focusXp = m; // 1 专注力 XP / 专注分钟
-    this.repository.awardAttributeXp("focus", focusXp);
+    const userBeforeFocus = this.repository.getUser();
+    const userAfterFocus = this.repository.awardAttributeXp("focus", focusXp);
+    this.logGrowthLedger(userBeforeFocus, userAfterFocus, "focus", task.title);
     this.repository.logEvent({
       source: "focus",
       type: "action",
@@ -324,6 +335,55 @@ export class NexusService implements OnModuleDestroy {
     });
     await this.syncVault();
     return { ok: true as const, focusXp, task, reachedEstimate };
+  }
+
+  /**
+   * §7 成长流水：把一次结算的 EP/经验/属性/等级变化落成统一事件流的一条 growth_ledger 事件，
+   * 供等级模块聚合「成长历程 / EP 来源 / 属性近期变化」。无任何变化则跳过。
+   */
+  private logGrowthLedger(
+    before: User,
+    after: User,
+    reason: GrowthLedgerReason,
+    refTitle?: string,
+  ): void {
+    const attrDeltas: Partial<Record<AttributeKey, number>> = {};
+    for (const k of ATTRIBUTE_KEYS) {
+      const d = (after.attributes[k] ?? 0) - (before.attributes[k] ?? 0);
+      if (d !== 0) attrDeltas[k] = d;
+    }
+    const epDelta = after.energyPoints - before.energyPoints;
+    const xpDelta = after.totalExp - before.totalExp;
+    const leveledUp = after.currentLevel > before.currentLevel;
+    if (epDelta === 0 && xpDelta === 0 && Object.keys(attrDeltas).length === 0 && !leveledUp) {
+      return;
+    }
+    const entry: GrowthLedgerEntry = {
+      reason,
+      refTitle,
+      epDelta,
+      xpDelta,
+      attrDeltas,
+      levelBefore: before.currentLevel,
+      levelAfter: after.currentLevel,
+    };
+    const epText = epDelta ? `${epDelta > 0 ? "+" : ""}${epDelta} EP` : "";
+    const lvlText = leveledUp ? `，升至 Lv.${after.currentLevel}` : "";
+    const summary = `${GROWTH_REASON_LABELS[reason]}${refTitle ? `「${refTitle}」` : ""}${
+      epText ? `：${epText}` : ""
+    }${lvlText}`;
+    this.repository.logEvent({
+      source: "growth-engine",
+      type: "system",
+      category: GROWTH_LEDGER_CATEGORY,
+      rawPayload: entry,
+      structured: { summary, ...entry } as unknown as Record<string, unknown>,
+      occurredAt: new Date().toISOString(),
+      confidence: 1,
+      tags: ["growth", reason, ...(leveledUp ? ["levelup"] : [])],
+      relatedGoalIds: [],
+      relatedTaskIds: [],
+    });
   }
 
   /** §6.6.1+6.6.2：记录链活动；命中里程碑时触发微洞察（失败不阻塞主流程）*/

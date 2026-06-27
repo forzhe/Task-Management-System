@@ -271,6 +271,58 @@ export const EMPTY_ATTRIBUTES: AttributeSet = {
   order: 0,
 };
 
+/** 六维属性键的稳定顺序（雷达图 / 遍历用单一真源）。 */
+export const ATTRIBUTE_KEYS: AttributeKey[] = [
+  "intellect",
+  "stamina",
+  "focus",
+  "willpower",
+  "creativity",
+  "order",
+];
+
+// ── 属性分级 + 动态量程 §4.1 ───────────────────────────────────────
+
+/** 属性段位系数：段位 L 的门槛 = L²·K。K 越小升级越快、数字越好看。 */
+export const ATTRIBUTE_LEVEL_K = 50;
+
+/** 某属性原始值 → 属性段位（与 calcLevel 同构）。 */
+export function attributeLevel(value: number): number {
+  return Math.max(0, Math.floor(Math.sqrt(Math.max(0, value) / ATTRIBUTE_LEVEL_K)));
+}
+
+export interface AttributeLevelProgress {
+  level: number;
+  /** 当前段位内进度 0..100（动态量程，永不撞顶）*/
+  pct: number;
+  /** 距下一段位还差的点数 */
+  toNext: number;
+  /** 当前段位门槛 */
+  floor: number;
+  /** 下一段位门槛 */
+  ceil: number;
+}
+
+/** 属性段位 + 段位内进度（§4.1 动态量程，满级也不会撞顶）。 */
+export function attributeLevelProgress(value: number): AttributeLevelProgress {
+  const v = Math.max(0, value);
+  const level = attributeLevel(v);
+  const floor = level * level * ATTRIBUTE_LEVEL_K;
+  const ceil = (level + 1) * (level + 1) * ATTRIBUTE_LEVEL_K;
+  const span = ceil - floor;
+  const pct = span > 0 ? Math.min(100, Math.max(0, Math.round(((v - floor) / span) * 100))) : 0;
+  return { level, pct, toNext: Math.max(0, Math.ceil(ceil - v)), floor, ceil };
+}
+
+/** 属性掌握度标签（§4.2）。 */
+export function attributeTierLabel(level: number): string {
+  if (level >= 20) return "大师";
+  if (level >= 15) return "卓越";
+  if (level >= 10) return "精通";
+  if (level >= 5) return "熟练";
+  return "萌芽";
+}
+
 export interface User {
   id: string;
   createdAt: ISODateTime;
@@ -338,6 +390,100 @@ export const UNLOCK_LABELS: Record<FeatureKey, string> = {
 
 export function isFeatureUnlocked(feature: FeatureKey, level: number): boolean {
   return level >= UNLOCK_LEVELS[feature];
+}
+
+// ── 觉醒阶段 §5.1 ──────────────────────────────────────────────────
+
+export interface AwakeningStage {
+  /** 1..8，连续 */
+  index: number;
+  /** 罗马序号 Ⅰ..Ⅷ */
+  roman: string;
+  /** 阶段名（宿主定名）*/
+  name: string;
+  /** 一句话释义 */
+  gloss: string;
+  minLevel: number;
+  /** null = 顶层阶段，无上限 */
+  maxLevel: number | null;
+}
+
+/** 觉醒阶段表，区间对齐 UNLOCK_LEVELS 里程碑（§5.1）。 */
+export const AWAKENING_STAGES: readonly AwakeningStage[] = [
+  { index: 1, roman: "Ⅰ", name: "启灵", gloss: "灵识初启", minLevel: 1, maxLevel: 4 },
+  { index: 2, roman: "Ⅱ", name: "见独", gloss: "照见自身", minLevel: 5, maxLevel: 9 },
+  { index: 3, roman: "Ⅲ", name: "赋形", gloss: "属性显形", minLevel: 10, maxLevel: 14 },
+  { index: 4, roman: "Ⅳ", name: "守中", gloss: "持中校准", minLevel: 15, maxLevel: 19 },
+  { index: 5, roman: "Ⅴ", name: "同波", gloss: "节律共振", minLevel: 20, maxLevel: 29 },
+  { index: 6, roman: "Ⅵ", name: "衍象", gloss: "推演万象", minLevel: 30, maxLevel: 49 },
+  { index: 7, roman: "Ⅶ", name: "自在", gloss: "自治自如", minLevel: 50, maxLevel: 99 },
+  { index: 8, roman: "Ⅷ", name: "盟约", gloss: "终极协议", minLevel: 100, maxLevel: null },
+];
+
+export function stageForLevel(level: number): AwakeningStage {
+  let stage: AwakeningStage = AWAKENING_STAGES[0]!;
+  for (const s of AWAKENING_STAGES) {
+    if (level >= s.minLevel) stage = s;
+  }
+  return stage;
+}
+
+/** 下一阶段；已处最高阶段时返回 null。 */
+export function nextStage(level: number): AwakeningStage | null {
+  const cur = stageForLevel(level);
+  return AWAKENING_STAGES.find((s) => s.index === cur.index + 1) ?? null;
+}
+
+// ── 称号 §5.2 ──────────────────────────────────────────────────────
+
+export interface TitleDef {
+  id: string;
+  name: string;
+  desc: string;
+}
+
+/** 称号目录；判定全部基于现有数据，赚来的身份不可购买。 */
+export const TITLE_CATALOG: readonly TitleDef[] = [
+  { id: "flow_artisan", name: "心流匠人", desc: "专注力达到「精通」段位（段位 ≥ 10）" },
+  { id: "iron_discipline", name: "铁律者", desc: "任一习惯链最长连续 ≥ 21 天" },
+  { id: "balanced", name: "均衡之主", desc: "六维属性段位极差 ≤ 2（且均 ≥ 段3）" },
+  { id: "marathoner", name: "长跑选手", desc: "觉醒等级达到 Lv.30" },
+  { id: "honest_proof", name: "诚实之证", desc: "可信度 ≥ 1.5" },
+  { id: "unbroken_chain", name: "不破之链", desc: "近 30 天无习惯链断裂" },
+];
+
+export interface TitleStatus extends TitleDef {
+  earned: boolean;
+}
+
+/** 称号判定（§5.2）。输入均为现有数据；referenceDate 默认今天。 */
+export function evaluateTitles(
+  user: Pick<User, "currentLevel" | "credibilityScore" | "attributes">,
+  streaks: UserStreak[],
+  referenceDate: Date = new Date(),
+): TitleStatus[] {
+  const levels = ATTRIBUTE_KEYS.map((k) => attributeLevel(user.attributes[k] ?? 0));
+  const focusLevel = attributeLevel(user.attributes.focus ?? 0);
+  const minLevel = levels.length ? Math.min(...levels) : 0;
+  const range = levels.length ? Math.max(...levels) - minLevel : 0;
+  const longestStreak = streaks.reduce((m, s) => Math.max(m, s.longestStreak ?? 0), 0);
+  const hasActiveChain = streaks.some((s) => (s.longestStreak ?? 0) > 0);
+  const msDay = 86_400_000;
+  const brokeWithin30 = streaks.some((s) =>
+    (s.brokenAt ?? []).some((d) => {
+      const t = Date.parse(d);
+      return Number.isFinite(t) && (referenceDate.getTime() - t) / msDay <= 30;
+    }),
+  );
+  const earned: Record<string, boolean> = {
+    flow_artisan: focusLevel >= 10,
+    iron_discipline: longestStreak >= 21,
+    balanced: minLevel >= 3 && range <= 2,
+    marathoner: user.currentLevel >= 30,
+    honest_proof: user.credibilityScore >= 1.5,
+    unbroken_chain: hasActiveChain && !brokeWithin30,
+  };
+  return TITLE_CATALOG.map((t) => ({ ...t, earned: earned[t.id] ?? false }));
 }
 
 // ── 能量点商城 §6.5 / §6.7.6 ───────────────────────────────────────
@@ -722,6 +868,36 @@ export interface NexusEvent {
   tags: string[];
   relatedGoalIds: string[];
   relatedTaskIds: string[];
+}
+
+// ── 成长流水 §7（个人等级模块规划书 P2）──────────────────────────
+/** 一笔成长结算的来源 */
+export type GrowthLedgerReason = "task" | "focus" | "review" | "goal" | "other";
+
+/** 成长流水事件的 category（落在统一事件流，§7 时间线从此聚合）*/
+export const GROWTH_LEDGER_CATEGORY = "growth_ledger";
+
+export const GROWTH_REASON_LABELS: Record<GrowthLedgerReason, string> = {
+  task: "任务完成",
+  focus: "深度专注",
+  review: "日终复盘",
+  goal: "目标推进",
+  other: "其他",
+};
+
+/** 成长流水条目（写入 NexusEvent.structured，前端据此渲染历程/EP来源/属性近期变化）*/
+export interface GrowthLedgerEntry {
+  reason: GrowthLedgerReason;
+  /** 触发来源标题（任务名等），可选 */
+  refTitle?: string;
+  /** 能量点变化（+赚 -花）*/
+  epDelta: number;
+  /** 觉醒经验变化 */
+  xpDelta: number;
+  /** 各属性变化（仅记非零项）*/
+  attrDeltas: Partial<Record<AttributeKey, number>>;
+  levelBefore: number;
+  levelAfter: number;
 }
 
 export interface ScreenActivitySummary {

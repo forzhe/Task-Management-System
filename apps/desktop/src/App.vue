@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import type { AttributeKey, Bounty, BountyCategory, FeatureKey, GoalLevel, NetGrowthVerdict, NexusEvent, ProfileChangeProposal, ProfileChangeStatus, Review, Task, TaskStatus, TaskStatusUpdateEvidence, UserStreak } from "@nexus/shared";
-import { ATTRIBUTE_LABELS, BOUNTY_CATEGORY_LABELS, BOUNTY_STATE_LABELS, DIVERGENCE_STATUS_LABELS, MBTI_AXIS_KEYS, NET_GROWTH_VERDICT_LABELS, OBSERVED_DIM_KEYS, OBSERVED_DIM_LABELS, PERIOD_TREND_LABELS, STREAK_LABELS, UNLOCK_LABELS, UNLOCK_LEVELS, assessProfileGrade, isFeatureUnlocked, profileFieldRiskTier, xpToNextLevel } from "@nexus/shared";
+import type { AttributeKey, Bounty, BountyCategory, FeatureKey, GoalLevel, GrowthLedgerEntry, GrowthLedgerReason, NetGrowthVerdict, NexusEvent, ProfileChangeProposal, ProfileChangeStatus, Review, Task, TaskStatus, TaskStatusUpdateEvidence, UserStreak } from "@nexus/shared";
+import { ATTRIBUTE_LABELS, BOUNTY_CATEGORY_LABELS, BOUNTY_STATE_LABELS, DIVERGENCE_STATUS_LABELS, GROWTH_LEDGER_CATEGORY, GROWTH_REASON_LABELS, MBTI_AXIS_KEYS, NET_GROWTH_VERDICT_LABELS, OBSERVED_DIM_KEYS, OBSERVED_DIM_LABELS, PERIOD_TREND_LABELS, STREAK_LABELS, UNLOCK_LABELS, UNLOCK_LEVELS, assessProfileGrade, attributeLevelProgress, attributeTierLabel, evaluateTitles, isFeatureUnlocked, nextStage, profileFieldRiskTier, stageForLevel, xpToNextLevel } from "@nexus/shared";
 import {
   Activity,
   AlertTriangle,
@@ -67,6 +67,8 @@ import {
   TrendingUp,
   User,
   X,
+  Award,
+  Lock,
   Zap,
 } from "lucide-vue-next";
 import { type Component, computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
@@ -732,6 +734,219 @@ const attrRadar = computed(() => {
   return { polygon, rings, axisPts };
 });
 
+// ── 觉醒等级仪表盘（个人等级模块规划书 P0）─────────────────────────
+const ATTR_MEANING: Record<AttributeKey, string> = {
+  intellect: "深度学习与认知产出",
+  stamina: "身体维护与精力基线",
+  focus: "单位时间专注质量",
+  willpower: "抗诱惑与坚持难事",
+  creativity: "创造性产出与发散",
+  order: "计划性与生活整洁度",
+};
+const ATTR_SOURCE: Record<AttributeKey, string> = {
+  intellect: "深度任务 · 复盘洞察",
+  stamina: "运动 · 作息 · 健康源",
+  focus: "番茄钟 · 无打断深度块",
+  willpower: "完成困难/拖延任务 · 守红线",
+  creativity: "创作类任务 · 新尝试",
+  order: "按计划完成 · 习惯链不断",
+};
+
+// 觉醒阶段（§5.1）
+const awakening = computed(() => {
+  const lvl = store.user?.currentLevel ?? 1;
+  const stage = stageForLevel(lvl);
+  const next = nextStage(lvl);
+  return { stage, next, levelsToNext: next ? Math.max(0, next.minLevel - lvl) : 0 };
+});
+
+// 等级环（conic-gradient 进度）
+const ringStyle = computed(() => ({
+  background: `conic-gradient(var(--accent) ${levelInfo.value.pct * 3.6}deg, var(--bg-metric) 0deg)`,
+}));
+
+// 可信度档位文案
+const credibilityLabel = computed(() => {
+  const s = store.user?.credibilityScore ?? 1;
+  return s >= 1.5 ? "高" : s >= 1.0 ? "中" : s >= 0.5 ? "偏低" : "低";
+});
+
+// 属性详情（§4 分级 + 动态量程 + 含义/来源）
+const attrDetails = computed(() =>
+  ATTR_KEYS.map((key) => {
+    const value = store.user?.attributes?.[key] ?? 0;
+    const prog = attributeLevelProgress(value);
+    return {
+      key,
+      label: ATTRIBUTE_LABELS[key],
+      value,
+      level: prog.level,
+      pct: prog.pct,
+      toNext: prog.toNext,
+      tier: attributeTierLabel(prog.level),
+      meaning: ATTR_MEANING[key],
+      source: ATTR_SOURCE[key],
+    };
+  }),
+);
+
+// 六维雷达：按属性段位的自相对画像，满级也有形状差异（§8）
+const levelRadar = computed(() => {
+  const n = ATTR_KEYS.length;
+  const cx = 110;
+  const cy = 104;
+  const R = 78;
+  const at = (i: number, radius: number) => {
+    const a = ((-90 + (360 / n) * i) * Math.PI) / 180;
+    return { x: cx + radius * Math.cos(a), y: cy + radius * Math.sin(a) };
+  };
+  const scores = ATTR_KEYS.map((k) => {
+    const p = attributeLevelProgress(store.user?.attributes?.[k] ?? 0);
+    return p.level + p.pct / 100;
+  });
+  const maxScore = Math.max(1, ...scores);
+  const polygon = scores
+    .map((sc, i) => {
+      const p = at(i, R * Math.max(0.08, sc / maxScore));
+      return `${p.x.toFixed(1)},${p.y.toFixed(1)}`;
+    })
+    .join(" ");
+  const dots = ATTR_KEYS.map((k, i) => {
+    const sc = scores[i] ?? 0;
+    const p = at(i, R * Math.max(0.08, sc / maxScore));
+    return { x: p.x.toFixed(1), y: p.y.toFixed(1), key: k };
+  });
+  const rings = [0.34, 0.67, 1].map((f) =>
+    ATTR_KEYS.map((_, i) => {
+      const p = at(i, R * f);
+      return `${p.x.toFixed(1)},${p.y.toFixed(1)}`;
+    }).join(" "),
+  );
+  const axisPts = ATTR_KEYS.map((k, i) => {
+    const edge = at(i, R);
+    const label = at(i, R + 16);
+    return {
+      x: edge.x.toFixed(1),
+      y: edge.y.toFixed(1),
+      lx: label.x.toFixed(1),
+      ly: label.y.toFixed(1),
+      label: ATTRIBUTE_LABELS[k],
+      key: k,
+    };
+  });
+  return { polygon, dots, rings, axisPts };
+});
+
+// 解锁路线图（§6）
+const UNLOCK_MILESTONES: { level: number; key: FeatureKey }[] = [
+  { level: 3, key: "shop" },
+  { level: 5, key: "review_insights" },
+  { level: 10, key: "attributes" },
+  { level: 15, key: "behavior_score" },
+  { level: 20, key: "weekly_summary" },
+  { level: 30, key: "path_simulation" },
+  { level: 50, key: "deep_analysis" },
+  { level: 100, key: "terminal" },
+];
+const unlockRoadmap = computed(() => {
+  const lvl = store.user?.currentLevel ?? 1;
+  const totalExp = store.user?.totalExp ?? 0;
+  const nextIdx = UNLOCK_MILESTONES.findIndex((m) => lvl < m.level);
+  return UNLOCK_MILESTONES.map((m, i) => ({
+    level: m.level,
+    key: m.key,
+    label: UNLOCK_LABELS[m.key],
+    unlocked: lvl >= m.level,
+    isNext: i === nextIdx,
+    levelsAway: Math.max(0, m.level - lvl),
+    xpAway: i === nextIdx ? Math.max(0, m.level * m.level * 100 - totalExp) : 0,
+  }));
+});
+
+// 称号（§5.2）
+const titleStatuses = computed(() => (store.user ? evaluateTitles(store.user, store.streaks) : []));
+const earnedTitles = computed(() => titleStatuses.value.filter((t) => t.earned));
+const wornTitle = computed(() => earnedTitles.value[0] ?? null);
+
+function goShop() {
+  setMainView("shop");
+}
+
+// ── 成长流水 §7（P2）─────────────────────────────────────────────
+interface LedgerRow extends GrowthLedgerEntry {
+  id: string;
+  occurredAt: string;
+}
+const ledgerRows = computed<LedgerRow[]>(() =>
+  store.growthEvents
+    .filter((e) => e.category === GROWTH_LEDGER_CATEGORY)
+    .map((e) => {
+      const s = e.structured as Record<string, unknown>;
+      return {
+        id: e.id,
+        occurredAt: e.occurredAt,
+        reason: (s.reason as GrowthLedgerReason) ?? "other",
+        refTitle: (s.refTitle as string | undefined) ?? undefined,
+        epDelta: Number(s.epDelta ?? 0),
+        xpDelta: Number(s.xpDelta ?? 0),
+        attrDeltas: (s.attrDeltas as Partial<Record<AttributeKey, number>>) ?? {},
+        levelBefore: Number(s.levelBefore ?? 0),
+        levelAfter: Number(s.levelAfter ?? 0),
+      };
+    }),
+);
+
+function withinDays(iso: string, days: number): boolean {
+  const t = Date.parse(iso);
+  return Number.isFinite(t) && (Date.now() - t) / 86_400_000 <= days;
+}
+
+// 最近成长流水（取前 14 条展示）
+const growthFlow = computed(() => ledgerRows.value.slice(0, 14));
+
+// 近 30 日 EP 来源构成
+const epBreakdown = computed(() => {
+  const byReason = new Map<GrowthLedgerReason, number>();
+  let total = 0;
+  for (const r of ledgerRows.value) {
+    if (r.epDelta > 0 && withinDays(r.occurredAt, 30)) {
+      byReason.set(r.reason, (byReason.get(r.reason) ?? 0) + r.epDelta);
+      total += r.epDelta;
+    }
+  }
+  const rows = [...byReason.entries()]
+    .map(([reason, ep]) => ({ reason, ep, pct: total > 0 ? Math.round((ep / total) * 100) : 0 }))
+    .sort((a, b) => b.ep - a.ep);
+  return { total, rows };
+});
+
+// 近 7 日各属性净变化（§4.3 来源追溯）
+const attrDelta7d = computed<Partial<Record<AttributeKey, number>>>(() => {
+  const acc: Partial<Record<AttributeKey, number>> = {};
+  for (const r of ledgerRows.value) {
+    if (!withinDays(r.occurredAt, 7)) continue;
+    for (const [k, v] of Object.entries(r.attrDeltas)) {
+      const key = k as AttributeKey;
+      acc[key] = (acc[key] ?? 0) + Number(v);
+    }
+  }
+  return acc;
+});
+function attrWeekDelta(key: AttributeKey): number {
+  return attrDelta7d.value[key] ?? 0;
+}
+
+function reasonLabel(reason: GrowthLedgerReason): string {
+  return GROWTH_REASON_LABELS[reason] ?? reason;
+}
+function attrLabel(key: string): string {
+  return ATTRIBUTE_LABELS[key as AttributeKey] ?? key;
+}
+function formatLedgerDate(iso: string): string {
+  const d = new Date(iso);
+  return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
 function unlocked(feature: FeatureKey): boolean {
   return isFeatureUnlocked(feature, store.user?.currentLevel ?? 1);
 }
@@ -1347,6 +1562,7 @@ watch(mainView, (k) => {
   if (k === "data") loadDay();
   if (k === "persona") seedPersona();
   if (k === "profile") void store.loadProfilePanel();
+  if (k === "level") void store.loadGrowthHistory();
   if (k === "shop" && unlocked("shop")) {
     void store.loadBounties();
     void store.loadShop();
@@ -1615,7 +1831,7 @@ const overviewInsight = computed(() => {
     </Teleport>
 
     <!-- ── 模块整页：点侧栏直接整屏切换（与总览/执行同级，不再用抽屉）──── -->
-    <section v-if="currentModule" class="module-page">
+    <section v-if="currentModule" :class="['module-page', mainView === 'level' && 'module-page-wide']">
       <header class="module-page-head">
         <component :is="currentModule.icon" :size="18" />
         <h2>{{ currentModule.title }}</h2>
@@ -1954,39 +2170,161 @@ const overviewInsight = computed(() => {
     </template>
 
     <template v-else-if="mainView === 'level'">
-    <!-- ── 觉醒等级 + 六维属性面板 ────────────────────────────────────── -->
-    <section v-if="store.user" :class="['attr-panel', !unlocked('attributes') && 'panel-locked']">
-      <div class="attr-header">
-        <Zap :size="16" />
-        <h2>觉醒等级 · Lv.{{ levelInfo.level }}</h2>
-        <span class="attr-energy">
-          <Sparkles :size="13" />
-          {{ store.user.energyPoints }} EP
-        </span>
-        <span class="attr-credibility" :style="{ color: credibilityColor }">
-          可信度 {{ store.user.credibilityScore.toFixed(2) }}
-        </span>
-      </div>
+    <!-- ── 觉醒等级仪表盘（个人等级模块规划书 P0）─────────────────────── -->
+    <section v-if="store.user" class="level-dash">
 
-      <!-- XP 进度条 -->
-      <div class="xp-bar-wrap">
-        <div class="xp-bar" :style="{ width: levelInfo.pct + '%' }" />
-        <span class="xp-label">{{ levelInfo.xpProgress }} / {{ levelInfo.xpNeeded - levelInfo.level * levelInfo.level * 100 }} XP → Lv.{{ levelInfo.level + 1 }}</span>
-      </div>
-
-      <!-- 六维属性 -->
-      <div class="attr-grid">
-        <div v-for="key in ATTR_KEYS" :key="key" class="attr-row">
-          <span class="attr-name">{{ ATTRIBUTE_LABELS[key] }}</span>
-          <div class="attr-track">
-            <div class="attr-fill" :style="{ width: attrPct(key) + '%' }" />
+      <!-- ① 顶部主区：等级环 + 阶段 + XP + 三指标卡 -->
+      <div class="ld-hero">
+        <div class="ld-ring" :style="ringStyle">
+          <div class="ld-ring-inner">
+            <span class="ld-ring-lv">Lv.{{ levelInfo.level }}</span>
+            <span class="ld-ring-pct">{{ levelInfo.pct }}%</span>
           </div>
-          <span class="attr-val">{{ store.user.attributes[key] ?? 0 }}</span>
+        </div>
+
+        <div class="ld-hero-body">
+          <div class="ld-stage-line">
+            <span class="ld-stage-name"><Zap :size="20" /> {{ awakening.stage.name }}</span>
+            <span class="ld-stage-gloss">{{ awakening.stage.roman }} · {{ awakening.stage.gloss }}</span>
+            <span v-if="wornTitle" class="ld-worn"><Award :size="15" /> {{ wornTitle.name }}</span>
+          </div>
+
+          <div class="ld-xp">
+            <div class="ld-xp-track"><div class="ld-xp-fill" :style="{ width: levelInfo.pct + '%' }" /></div>
+            <span class="ld-xp-label">
+              {{ levelInfo.xpProgress }} / {{ levelInfo.xpNeeded - levelInfo.level * levelInfo.level * 100 }} XP → Lv.{{ levelInfo.level + 1 }}
+              <template v-if="awakening.next"> · 再 {{ awakening.levelsToNext }} 级进入「{{ awakening.next.name }}」</template>
+            </span>
+          </div>
+
+          <div class="ld-cards">
+            <div class="ld-card ld-card--level">
+              <span class="ld-card-key">觉醒等级</span>
+              <strong class="ld-card-num">Lv.{{ levelInfo.level }}</strong>
+              <span class="ld-card-sub">累计经验 {{ store.user.totalExp.toLocaleString() }} XP</span>
+            </div>
+            <button class="ld-card ld-card-btn ld-card--ep" type="button" @click="goShop">
+              <span class="ld-card-key">能量点 EP</span>
+              <strong class="ld-card-num">{{ store.user.energyPoints.toLocaleString() }}</strong>
+              <span class="ld-card-sub">可消费货币 · 去商城兑换 →</span>
+            </button>
+            <div class="ld-card ld-card--cred">
+              <span class="ld-card-key">可信度</span>
+              <strong class="ld-card-num" :style="{ color: credibilityColor }">{{ store.user.credibilityScore.toFixed(2) }}</strong>
+              <span class="ld-card-sub">数据信任度 · {{ credibilityLabel }}</span>
+            </div>
+          </div>
         </div>
       </div>
-      <!-- 锁定遮罩：< Lv.10 时显示 -->
-      <div v-if="!unlocked('attributes')" class="lock-overlay">
-        <span>{{ lockMsg('attributes') }}</span>
+
+      <!-- ② 属性区：雷达 + 段位详情 -->
+      <div :class="['ld-block', 'ld-attr', !unlocked('attributes') && 'panel-locked']">
+        <div class="ld-block-head">
+          <Radar :size="17" /><h3>六维属性</h3><span class="ld-block-sub">段位制 · 动态量程</span>
+        </div>
+        <div class="ld-attr-body">
+          <div class="ld-radar">
+            <svg viewBox="0 0 220 208" preserveAspectRatio="xMidYMid meet">
+              <polygon v-for="(r, i) in levelRadar.rings" :key="'r' + i" :points="r" class="ld-radar-ring" />
+              <line v-for="(a, i) in levelRadar.axisPts" :key="'x' + i" x1="110" y1="104" :x2="a.x" :y2="a.y" class="ld-radar-axis" />
+              <polygon :points="levelRadar.polygon" class="ld-radar-area" />
+              <circle v-for="d in levelRadar.dots" :key="'d' + d.key" :cx="d.x" :cy="d.y" r="4.5" :class="['ld-radar-dot', 'attr-' + d.key]" />
+              <text v-for="a in levelRadar.axisPts" :key="'t' + a.key" :x="a.lx" :y="a.ly" :class="['ld-radar-text', 'attr-' + a.key]">{{ a.label }}</text>
+            </svg>
+          </div>
+          <div class="ld-attr-list">
+            <details v-for="a in attrDetails" :key="a.key" :class="['ld-attr-item', 'attr-' + a.key]">
+              <summary class="ld-attr-sum">
+                <span class="ld-attr-name">{{ a.label }}</span>
+                <span class="ld-attr-tier">{{ a.tier }} · 段 {{ a.level }}</span>
+                <div class="ld-attr-track"><div class="ld-attr-fill" :style="{ width: a.pct + '%' }" /></div>
+                <span class="ld-attr-next">距 {{ a.level + 1 }} 级 +{{ a.toNext }}</span>
+                <ChevronDown :size="16" class="ld-attr-caret" />
+              </summary>
+              <div class="ld-attr-detail">
+                <p class="ld-attr-meaning">{{ a.meaning }}</p>
+                <p v-if="attrWeekDelta(a.key)" class="ld-attr-week">
+                  近 7 日 {{ attrWeekDelta(a.key) > 0 ? '+' : '' }}{{ attrWeekDelta(a.key) }} 点
+                </p>
+                <p class="ld-attr-source">来源：{{ a.source }}</p>
+                <p class="ld-attr-raw">当前累计 {{ a.value.toLocaleString() }} 点</p>
+              </div>
+            </details>
+          </div>
+        </div>
+        <div v-if="!unlocked('attributes')" class="lock-overlay"><span>{{ lockMsg('attributes') }}</span></div>
+      </div>
+
+      <!-- ③ 解锁路线图 -->
+      <div class="ld-block">
+        <div class="ld-block-head">
+          <Route :size="17" /><h3>解锁路线图</h3><span class="ld-block-sub">觉醒权限阶梯</span>
+        </div>
+        <div class="ld-road">
+          <div v-for="m in unlockRoadmap" :key="m.key" :class="['ld-node', { on: m.unlocked, next: m.isNext }]">
+            <span class="ld-node-dot"><component :is="m.unlocked ? Unlock : Lock" :size="15" /></span>
+            <span class="ld-node-lv">Lv.{{ m.level }}</span>
+            <span class="ld-node-label">{{ m.label }}</span>
+            <span v-if="m.isNext" class="ld-node-away">还差 {{ m.levelsAway }} 级 · ≈{{ m.xpAway.toLocaleString() }} XP</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- ④ 称号墙 -->
+      <div class="ld-block">
+        <div class="ld-block-head">
+          <Award :size="17" /><h3>称号墙</h3><span class="ld-block-sub">{{ earnedTitles.length }} / {{ titleStatuses.length }} 已获得</span>
+        </div>
+        <div class="ld-title-grid">
+          <div
+            v-for="t in titleStatuses"
+            :key="t.id"
+            :class="['ld-title', { earned: t.earned, worn: wornTitle && wornTitle.id === t.id }]"
+          >
+            <span class="ld-title-top"><Award :size="16" /><span class="ld-title-name">{{ t.name }}</span></span>
+            <span class="ld-title-desc">{{ t.desc }}</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- ⑤ 成长历程 / EP 流水 -->
+      <div class="ld-block">
+        <div class="ld-block-head">
+          <History :size="17" /><h3>成长历程</h3><span class="ld-block-sub">近 30 日能量流水 · 升级里程碑</span>
+        </div>
+
+        <div v-if="epBreakdown.total > 0" class="ld-epsum">
+          <div class="ld-epsum-total">近 30 日入账 <strong>+{{ epBreakdown.total.toLocaleString() }}</strong> EP</div>
+          <div class="ld-epbar">
+            <div
+              v-for="r in epBreakdown.rows"
+              :key="r.reason"
+              :class="['ld-epseg', 'seg-' + r.reason]"
+              :style="{ width: r.pct + '%' }"
+              :title="`${reasonLabel(r.reason)} ${r.ep} EP`"
+            />
+          </div>
+          <div class="ld-eplegend">
+            <span v-for="r in epBreakdown.rows" :key="r.reason" :class="['ld-epchip', 'seg-' + r.reason]">
+              {{ reasonLabel(r.reason) }} · {{ r.ep.toLocaleString() }} EP
+            </span>
+          </div>
+        </div>
+
+        <ul v-if="growthFlow.length" class="ld-flow">
+          <li v-for="row in growthFlow" :key="row.id" class="ld-flow-row">
+            <span class="ld-flow-date">{{ formatLedgerDate(row.occurredAt) }}</span>
+            <span v-if="row.levelAfter > row.levelBefore" class="ld-flow-lvl"><Zap :size="13" /> 升至 Lv.{{ row.levelAfter }}</span>
+            <span class="ld-flow-reason">
+              {{ reasonLabel(row.reason) }}<template v-if="row.refTitle">「{{ row.refTitle }}」</template>
+            </span>
+            <span class="ld-flow-deltas">
+              <span v-if="row.epDelta" class="ld-d ep">{{ row.epDelta > 0 ? '+' : '' }}{{ row.epDelta }} EP</span>
+              <span v-for="(v, k) in row.attrDeltas" :key="k" :class="['ld-d', 'attr', 'attr-' + k]">{{ attrLabel(k) }} {{ Number(v) > 0 ? '+' : '' }}{{ Number(v) }}</span>
+            </span>
+          </li>
+        </ul>
+        <p v-else class="ld-empty">近 30 日暂无成长流水。完成任务、深度专注后，你的成长轨迹会实时出现在这里。</p>
       </div>
     </section>
     </template>
